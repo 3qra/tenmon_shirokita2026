@@ -2,6 +2,8 @@
 *.class
 *.log
 *.pyc
+__pycache__/
+*.db
 *.swp
 .DS_Store
 .atom/
