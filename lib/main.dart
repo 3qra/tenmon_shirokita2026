@@ -204,7 +204,6 @@ class _HomePageState extends State<HomePage> {
       StandAdminPage(api: widget.api),
       FinancePage(api: widget.api),
       SettingsPage(api: widget.api, user: widget.user),
-      LogsPage(api: widget.api),
     ];
     return Scaffold(
       appBar: AppBar(
@@ -260,11 +259,6 @@ class _HomePageState extends State<HomePage> {
                 icon: Icon(Icons.settings_outlined),
                 selectedIcon: Icon(Icons.settings),
                 label: Text('設定'),
-              ),
-              NavigationRailDestination(
-                icon: Icon(Icons.history_outlined),
-                selectedIcon: Icon(Icons.history),
-                label: Text('ログ'),
               ),
             ],
           ),
@@ -1263,6 +1257,19 @@ class _StandAdminPageState extends State<StandAdminPage> {
                       Navigator.of(context).push(
                         MaterialPageRoute(
                           fullscreenDialog: true,
+                          builder: (_) => KitchenTouchPage(api: widget.api),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.touch_app),
+                    label: const Text('キッチン操作'),
+                  ),
+                  const SizedBox(width: 12),
+                  FilledButton.tonalIcon(
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          fullscreenDialog: true,
                           builder: (_) => OrderDisplayPage(api: widget.api),
                         ),
                       );
@@ -1602,6 +1609,213 @@ class _StandAdminPageState extends State<StandAdminPage> {
           : (item['remaining_count'] as num).toInt(),
     );
     _reload();
+  }
+}
+
+class KitchenTouchPage extends StatefulWidget {
+  const KitchenTouchPage({super.key, required this.api});
+
+  final ApiClient api;
+
+  @override
+  State<KitchenTouchPage> createState() => _KitchenTouchPageState();
+}
+
+class _KitchenTouchPageState extends State<KitchenTouchPage> {
+  late Future<List<dynamic>> future = widget.api.orders();
+  bool updating = false;
+  String? message;
+
+  void _reload() {
+    setState(() {
+      future = widget.api.orders();
+    });
+  }
+
+  Future<void> _setOrderItemsStatus(dynamic order, String status) async {
+    setState(() {
+      updating = true;
+      message = null;
+    });
+    try {
+      final items = (order['items'] as List<dynamic>).where((item) {
+        final itemStatus = item['status'].toString();
+        if (status == 'called') {
+          return itemStatus == 'ready' || itemStatus == 'preparing';
+        }
+        if (status == 'served') {
+          return itemStatus != 'served';
+        }
+        return false;
+      }).toList();
+      for (final item in items) {
+        await widget.api.updateOrderItemStatus(
+          order['id'].toString(),
+          item['id'].toString(),
+          status,
+        );
+      }
+      _reload();
+    } on ApiException catch (exception) {
+      if (mounted) {
+        setState(() => message = exception.message);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => updating = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xfff8fafc),
+      appBar: AppBar(
+        title: const Text('キッチン操作'),
+        actions: [
+          IconButton(
+            tooltip: '再読み込み',
+            onPressed: updating ? null : _reload,
+            icon: const Icon(Icons.refresh),
+          ),
+          IconButton(
+            tooltip: '閉じる',
+            onPressed: () => Navigator.of(context).pop(),
+            icon: const Icon(Icons.close),
+          ),
+        ],
+      ),
+      body: FutureBuilder<List<dynamic>>(
+        future: future,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError) {
+            return ErrorPanel(error: snapshot.error.toString());
+          }
+          final activeOrders = snapshot.data!
+              .where(
+                (order) =>
+                    order['status'] != 'served' &&
+                    order['status'] != 'cancelled',
+              )
+              .toList();
+          if (activeOrders.isEmpty) {
+            return const Center(child: Text('処理中の注文はありません'));
+          }
+          return GridView.builder(
+            padding: const EdgeInsets.all(20),
+            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+              maxCrossAxisExtent: 420,
+              mainAxisExtent: 300,
+              crossAxisSpacing: 16,
+              mainAxisSpacing: 16,
+            ),
+            itemCount: activeOrders.length + (message == null ? 0 : 1),
+            itemBuilder: (context, index) {
+              if (message != null && index == 0) {
+                return Card(
+                  color: Theme.of(context).colorScheme.errorContainer,
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Text(
+                        message!,
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          color: Theme.of(context).colorScheme.onErrorContainer,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }
+              final orderIndex = message == null ? index : index - 1;
+              final order = activeOrders[orderIndex] as Map<String, dynamic>;
+              final items = order['items'] as List<dynamic>;
+              final orderStatus = order['status'].toString();
+              final canCall =
+                  orderStatus == 'ready' || orderStatus == 'preparing';
+              return Card(
+                clipBehavior: Clip.antiAlias,
+                child: Padding(
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            displayOrderNo(order),
+                            style: Theme.of(context).textTheme.displaySmall
+                                ?.copyWith(fontWeight: FontWeight.w900),
+                          ),
+                          const Spacer(),
+                          StatusBadge(status: orderStatus),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Expanded(
+                        child: ListView(
+                          children: [
+                            for (final item in items)
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 6),
+                                child: Text(
+                                  '${item['item_name']} x${item['quantity']}',
+                                  style: Theme.of(context).textTheme.titleLarge
+                                      ?.copyWith(
+                                        color: statusTextColor(
+                                          item['status'].toString(),
+                                        ),
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: FilledButton.icon(
+                              onPressed: updating || !canCall
+                                  ? null
+                                  : () => _setOrderItemsStatus(order, 'called'),
+                              icon: const Icon(Icons.notifications_active),
+                              label: const Text('呼び出し'),
+                              style: FilledButton.styleFrom(
+                                minimumSize: const Size.fromHeight(64),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: FilledButton.icon(
+                              onPressed: updating
+                                  ? null
+                                  : () => _setOrderItemsStatus(order, 'served'),
+                              icon: const Icon(Icons.done_all),
+                              label: const Text('受取済'),
+                              style: FilledButton.styleFrom(
+                                minimumSize: const Size.fromHeight(64),
+                                backgroundColor: const Color(0xff16a34a),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
   }
 }
 
@@ -2126,6 +2340,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final selectedPermissions = <String>{};
   String? accountMessage;
   bool creatingUser = false;
+  int selectedSettingsIndex = 0;
 
   @override
   Widget build(BuildContext context) {
@@ -2134,64 +2349,98 @@ class _SettingsPageState extends State<SettingsPage> {
         .toList();
     return AppPage(
       title: '設定',
-      child: DefaultTabController(
-        length: 3,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const TabBar(
-              tabs: [
-                Tab(icon: Icon(Icons.person_add_alt_1), text: 'アカウント作成'),
-                Tab(icon: Icon(Icons.verified_user_outlined), text: '現在の権限'),
-                Tab(icon: Icon(Icons.dns_outlined), text: '接続'),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 260,
+            child: ListView(
+              children: [
+                _settingsButton(
+                  index: 0,
+                  icon: Icons.person_add_alt_1,
+                  title: 'アカウント作成',
+                  subtitle: 'IDと権限を登録',
+                ),
+                _settingsButton(
+                  index: 1,
+                  icon: Icons.verified_user_outlined,
+                  title: '現在の権限',
+                  subtitle: '${permissions.length}権限',
+                ),
+                _settingsButton(
+                  index: 2,
+                  icon: Icons.history,
+                  title: '操作ログ',
+                  subtitle: '監査ログを確認',
+                ),
+                _settingsButton(
+                  index: 3,
+                  icon: Icons.dns_outlined,
+                  title: '接続',
+                  subtitle: 'API接続先',
+                ),
               ],
             ),
-            const SizedBox(height: 12),
-            Expanded(
-              child: TabBarView(
-                children: [
-                  _buildAccountCreateTab(),
-                  ListView(
-                    children: [
-                      AdminPanel(
-                        color: const Color(0xffeef2ff),
-                        icon: Icons.admin_panel_settings_outlined,
-                        title: 'ログイン中ユーザー',
-                        subtitle:
-                            '${widget.user['login_id']} / ${widget.user['role']}',
-                        trailing: Text(
-                          '${permissions.length}権限',
-                          style: Theme.of(context).textTheme.headlineSmall,
-                        ),
-                        action: const SizedBox.shrink(),
-                      ),
-                      const SizedBox(height: 16),
-                      Text('権限', style: Theme.of(context).textTheme.titleLarge),
-                      const SizedBox(height: 8),
-                      for (final permission in permissions)
-                        Card(
-                          child: ListTile(
-                            leading: const Icon(Icons.verified_user_outlined),
-                            title: Text(permission),
-                          ),
-                        ),
-                    ],
-                  ),
-                  ListView(
-                    children: [
-                      Card(
-                        child: ListTile(
-                          leading: const Icon(Icons.dns_outlined),
-                          title: const Text('API 接続先'),
-                          subtitle: Text(widget.api.baseUrl),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+          ),
+          const SizedBox(width: 18),
+          Expanded(
+            child: IndexedStack(
+              index: selectedSettingsIndex,
+              children: [
+                _buildAccountCreateTab(),
+                _buildPermissionsTab(permissions),
+                _buildLogsTab(),
+                _buildConnectionTab(),
+              ],
             ),
-          ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _settingsButton({
+    required int index,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) {
+    final selected = selectedSettingsIndex == index;
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: selected ? colorScheme.primaryContainer : colorScheme.surface,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () => setState(() => selectedSettingsIndex = index),
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                Icon(icon, color: selected ? colorScheme.primary : null),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                      Text(
+                        subtitle,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -2233,39 +2482,29 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
             const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: loginIdController,
-                    decoration: const InputDecoration(
-                      labelText: 'ログインID',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: TextField(
-                    controller: displayNameController,
-                    decoration: const InputDecoration(
-                      labelText: '表示名',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: TextField(
-                    controller: passwordController,
-                    obscureText: true,
-                    decoration: const InputDecoration(
-                      labelText: 'パスワード（8文字以上）',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                ),
-              ],
+            TextField(
+              controller: loginIdController,
+              decoration: const InputDecoration(
+                labelText: 'ログインID',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: displayNameController,
+              decoration: const InputDecoration(
+                labelText: '表示名',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: passwordController,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'パスワード（8文字以上）',
+                border: OutlineInputBorder(),
+              ),
             ),
             const SizedBox(height: 16),
             Text('権限', style: Theme.of(context).textTheme.titleLarge),
@@ -2334,6 +2573,63 @@ class _SettingsPageState extends State<SettingsPage> {
           ],
         );
       },
+    );
+  }
+
+  Widget _buildPermissionsTab(List<String> permissions) {
+    return ListView(
+      children: [
+        AdminPanel(
+          color: const Color(0xffeef2ff),
+          icon: Icons.admin_panel_settings_outlined,
+          title: 'ログイン中ユーザー',
+          subtitle: '${widget.user['login_id']} / ${widget.user['role']}',
+          trailing: Text(
+            '${permissions.length}権限',
+            style: Theme.of(context).textTheme.headlineSmall,
+          ),
+          action: const SizedBox.shrink(),
+        ),
+        const SizedBox(height: 16),
+        Text('権限', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 8),
+        for (final permission in permissions)
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.verified_user_outlined),
+              title: Text(permission),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildLogsTab() {
+    return FutureBuilder<List<dynamic>>(
+      future: widget.api.logs(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return ErrorPanel(error: snapshot.error.toString());
+        }
+        return LogList(logs: snapshot.data!);
+      },
+    );
+  }
+
+  Widget _buildConnectionTab() {
+    return ListView(
+      children: [
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.dns_outlined),
+            title: const Text('API 接続先'),
+            subtitle: Text(widget.api.baseUrl),
+          ),
+        ),
+      ],
     );
   }
 
