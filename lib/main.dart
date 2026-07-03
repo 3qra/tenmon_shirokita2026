@@ -1193,6 +1193,13 @@ class _StandAdminPageState extends State<StandAdminPage> {
           return ListView(
             children: [
               Card(
+                color: allSaleStopped ? const Color(0xffffebee) : null,
+                shape: allSaleStopped
+                    ? RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        side: const BorderSide(color: Color(0xffef9a9a)),
+                      )
+                    : null,
                 child: SwitchListTile(
                   value: allSaleStopped,
                   title: const Text('全商品を一括で発売中止'),
