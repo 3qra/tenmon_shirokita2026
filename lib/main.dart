@@ -51,31 +51,79 @@ class LoginGate extends StatefulWidget {
 
 class _LoginGateState extends State<LoginGate> {
   Map<String, dynamic>? user;
+  String? loginMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.api.onUnauthorized = _handleUnauthorized;
+  }
+
+  @override
+  void didUpdateWidget(LoginGate oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.api != widget.api) {
+      oldWidget.api.onUnauthorized = null;
+      widget.api.onUnauthorized = _handleUnauthorized;
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.api.onUnauthorized = null;
+    super.dispose();
+  }
+
+  void _handleUnauthorized(String message) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      user = null;
+      loginMessage = '$message。再度ログインしてください。';
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     if (user == null) {
       return LoginPage(
         api: widget.api,
-        onLoggedIn: (value) => setState(() => user = value),
+        message: loginMessage,
+        onLoggedIn: (value) => setState(() {
+          user = value;
+          loginMessage = null;
+        }),
       );
     }
     return HomePage(
       api: widget.api,
       user: user!,
       onLogout: () async {
-        await widget.api.logout();
-        setState(() => user = null);
+        try {
+          await widget.api.logout();
+        } on ApiException {
+          // A failed logout should still return the operator to the login page.
+        }
+        if (mounted) {
+          setState(() => user = null);
+        }
       },
     );
   }
 }
 
 class LoginPage extends StatefulWidget {
-  const LoginPage({super.key, required this.api, required this.onLoggedIn});
+  const LoginPage({
+    super.key,
+    required this.api,
+    required this.onLoggedIn,
+    this.message,
+  });
 
   final ApiClient api;
   final ValueChanged<Map<String, dynamic>> onLoggedIn;
+  final String? message;
 
   @override
   State<LoginPage> createState() => _LoginPageState();
@@ -86,6 +134,20 @@ class _LoginPageState extends State<LoginPage> {
   final passwordController = TextEditingController(text: 'admin1234');
   String? error;
   bool loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    error = widget.message;
+  }
+
+  @override
+  void didUpdateWidget(LoginPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.message != widget.message && widget.message != null) {
+      error = widget.message;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

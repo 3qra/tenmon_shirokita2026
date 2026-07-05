@@ -24,6 +24,7 @@ class ApiClient {
   final String baseUrl;
   final ApiTransport _transport = ApiTransport();
   String? token;
+  ValueChanged<String>? onUnauthorized;
 
   Future<Map<String, dynamic>> login(String loginId, String password) async {
     final data = await _send<Map<String, dynamic>>(
@@ -253,9 +254,13 @@ class ApiClient {
       final decoded = response.body.isEmpty ? null : jsonDecode(response.body);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         final detail = decoded is Map ? decoded['detail'] : null;
-        throw ApiException(
-          detail?.toString() ?? 'API error ${response.statusCode}',
-        );
+        final message =
+            detail?.toString() ?? 'API error ${response.statusCode}';
+        if (authenticated && response.statusCode == 401) {
+          token = null;
+          onUnauthorized?.call(message);
+        }
+        throw ApiException(message, statusCode: response.statusCode);
       }
       return decoded as T;
     } on FormatException {
@@ -269,9 +274,10 @@ class ApiClient {
 }
 
 class ApiException implements Exception {
-  ApiException(this.message);
+  ApiException(this.message, {this.statusCode});
 
   final String message;
+  final int? statusCode;
 
   @override
   String toString() => message;
