@@ -1,0 +1,13 @@
+{
+  "appclips": { "apps": ["TEAMID.jp.example.gakusai.Clip"] },
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["TEAMID.jp.example.gakusai"],
+        "components": [
+          { "/": "/order/*" }, { "/": "/o/*" }, { "/": "/r/*" }, { "/": "/c/*" }, { "/": "/planetarium*" }
+        ]
+      }
+    ]
+  }
+}

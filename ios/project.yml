@@ -1,0 +1,153 @@
+# XcodeGen プロジェクト定義
+#   生成: cd ios && xcodegen generate
+#   生成物（GakusaiPortal.xcodeproj、Info.plist、*.entitlements）はこのファイルから再生成できるため手で編集しない。
+#
+# 置き換えが必要なプレースホルダー（README.md 参照）:
+#   - DEVELOPMENT_TEAM          … Apple Developer の Team ID
+#   - jp.example.gakusai        … 本番のバンドルID（App Clip は「<親アプリのID>.Clip」にする）
+#   - example.com               … 関連ドメイン（appclips: / applinks:）と API_BASE_URL / WEB_BASE_URL
+
+name: GakusaiPortal
+
+options:
+  bundleIdPrefix: jp.example
+  deploymentTarget:
+    iOS: "17.0"
+  developmentLanguage: ja
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    # Swift 6 へ移行しやすいよう、並行性チェックの警告を出しておく
+    SWIFT_STRICT_CONCURRENCY: targeted
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""            # ← 自分の Team ID（10桁）に置き換える
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    # API・Web の接続先。Info.plist の API_BASE_URL / WEB_BASE_URL に展開される。
+    API_BASE_URL: https://example.com   # ← 本番ドメインに置き換える
+    WEB_BASE_URL: https://example.com   # ← 本番ドメインに置き換える
+  configs:
+    Debug:
+      # シミュレーターからローカルの docker compose に接続する（実機では Mac のIPアドレス等に変更）
+      API_BASE_URL: http://localhost:8080
+      WEB_BASE_URL: http://localhost:3000
+
+targets:
+  # ------------------------------------------------------------------
+  # 通常版アプリ（注文・プラネタリウム予約・マイチケット・スタッフ機能）
+  # ------------------------------------------------------------------
+  GakusaiPortal:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: jp.example.gakusai   # ← 本番のバンドルIDに置き換える
+        PRODUCT_NAME: GakusaiPortal
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: 学祭ポータル
+        CFBundleDevelopmentRegion: ja
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSCameraUsageDescription: 入場チケットやクーポンのQRコードを読み取るためにカメラを使用します。
+        ITSAppUsesNonExemptEncryption: false
+        API_BASE_URL: $(API_BASE_URL)
+        WEB_BASE_URL: $(WEB_BASE_URL)
+        NSAppTransportSecurity:
+          # 開発時に localhost / LAN の http へ接続するためだけの例外（インターネット上の http は許可しない）
+          NSAllowsLocalNetworking: true
+    entitlements:
+      path: App/GakusaiPortal.entitlements
+      properties:
+        com.apple.developer.associated-domains:
+          - appclips:example.com   # ← 本番ドメインに置き換える
+          - applinks:example.com   # ← 本番ドメインに置き換える
+    dependencies:
+      # App Clip を通常版アプリに埋め込む（Embed App Clips: $(CONTENTS_FOLDER_PATH)/AppClips）
+      - target: GakusaiPortalClip
+        embed: true
+
+  # ------------------------------------------------------------------
+  # App Clip（来場者のモバイル注文）
+  # ------------------------------------------------------------------
+  GakusaiPortalClip:
+    type: application.on-demand-install-capable
+    platform: iOS
+    sources:
+      - path: Clip
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: jp.example.gakusai.Clip   # ← 「<親アプリのID>.Clip」に置き換える
+        PRODUCT_NAME: GakusaiPortalClip
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) APPCLIP
+    info:
+      path: Clip/Info.plist
+      properties:
+        CFBundleDisplayName: やきうどん注文
+        CFBundleDevelopmentRegion: ja
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        ITSAppUsesNonExemptEncryption: false
+        API_BASE_URL: $(API_BASE_URL)
+        WEB_BASE_URL: $(WEB_BASE_URL)
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSAppClip:
+          NSAppClipRequestEphemeralUserNotification: false
+          NSAppClipRequestLocationConfirmation: false
+    entitlements:
+      path: Clip/GakusaiPortalClip.entitlements
+      properties:
+        com.apple.developer.parent-application-identifiers:
+          - $(AppIdentifierPrefix)jp.example.gakusai   # ← 親アプリのバンドルIDに合わせる
+        com.apple.developer.associated-domains:
+          - appclips:example.com   # ← 本番ドメインに置き換える
+
+schemes:
+  GakusaiPortal:
+    build:
+      targets:
+        GakusaiPortal: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
+  GakusaiPortalClip:
+    build:
+      targets:
+        GakusaiPortalClip: all
+    run:
+      config: Debug
+      environmentVariables:
+        # App Clip をローカルで起動するときの呼び出しURL。
+        # 部門IDは GET /api/v1/public/departments で確認した「やきうどん」の id に置き換える。
+        _XCAppClipURL: https://example.com/order/00000000-0000-0000-0000-000000000000
+    archive:
+      config: Release

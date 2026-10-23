@@ -1,0 +1,44 @@
+/* 管理画面専用の追加スタイル（globals.css の変数・部品を再利用） */
+.admin-nav { display: flex; gap: 4px; overflow-x: auto; margin: 0 0 12px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.admin-nav a { padding: 8px 12px; border-radius: 8px; text-decoration: none; color: var(--text); white-space: nowrap; font-size: 0.9rem; border: 1px solid transparent; }
+.admin-nav a:hover { border-color: var(--border); }
+.admin-nav a.active { background: var(--surface-2); border-color: var(--primary); color: var(--primary); font-weight: 700; }
+
+.admin-float { position: fixed; left: 12px; right: 12px; bottom: 80px; z-index: 70; max-width: 720px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; box-shadow: 0 4px 16px #0004; }
+.admin-float .btn { flex: none; }
+
+.form-grid { display: grid; gap: 8px 12px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); align-items: end; }
+.form-grid .span-2 { grid-column: span 2; }
+.form-grid .span-all { grid-column: 1 / -1; }
+@media (max-width: 480px) { .form-grid .span-2 { grid-column: 1 / -1; } }
+.help { display: block; font-size: 0.8rem; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+.seg { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.seg .btn[aria-pressed="true"] { background: var(--primary); color: var(--primary-ink); border-color: var(--primary); }
+.inline-input { min-height: 36px; padding: 4px 8px; font-size: 0.95rem; }
+input.inline-input[type="number"] { width: 6.5em; }
+select.inline-input { width: auto; min-width: 7em; }
+.table-wrap table.compact td, .table-wrap table.compact th { padding: 6px 8px; }
+tr.row-muted td { opacity: 0.6; }
+tr.row-danger td { background: var(--danger-bg); }
+tr.row-skip td { color: var(--muted); text-decoration: line-through; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 0.9rem; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; }
+pre.json { white-space: pre-wrap; word-break: break-all; background: var(--surface-2); padding: 8px; border-radius: 8px; font-size: 0.8rem; max-height: 320px; overflow: auto; margin: 4px 0 0; }
+details > summary { cursor: pointer; min-height: 32px; }
+.check-list { display: grid; gap: 2px 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+.check-list .check { min-height: 36px; }
+.sub-list { margin-left: 28px; }
+.coupon-print-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+.coupon-print-card { border: 1px dashed var(--border); border-radius: 8px; padding: 8px; text-align: center; break-inside: avoid; }
+.coupon-print-card .no { font-size: 1.2rem; font-weight: 800; letter-spacing: 0.05em; }
+.slot-card.inactive { opacity: 0.65; border-style: dashed; }
+
+@media print {
+  .admin-nav, .admin-float, .toast { display: none !important; }
+  body.admin-print-coupons .admin-page > :not(.coupon-print) { display: none !important; }
+  body.admin-print-coupons .coupon-print .no-print { display: none !important; }
+  body.admin-print-coupons { background: #fff; color: #000; }
+}

@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">学祭ポータル</string>
+
+    <!-- 共通 -->
+    <string name="action_back">戻る</string>
+    <string name="action_refresh">再読み込み</string>
+    <string name="action_retry">もう一度試す</string>
+    <string name="loading">読み込み中</string>
+    <string name="last_updated">最終更新 %1$s</string>
+    <string name="last_updated_never">まだ情報を取得できていません</string>
+    <string name="stale_warning">情報が古い可能性があります。通信状態を確認してください</string>
+    <string name="live_disconnected">自動更新が途切れています（再接続中）</string>
+    <string name="qr_error">QRコードを表示できません</string>
+    <string name="quantity_value">%1$d</string>
+    <string name="time_range">%1$s〜%2$s</string>
+
+    <!-- エラー -->
+    <string name="error_title">エラーが発生しました</string>
+    <string name="error_title_network">通信できませんでした</string>
+    <string name="error_network">電波の良い場所で、もう一度お試しください。</string>
+    <string name="error_protocol">サーバーからの応答を読み取れませんでした。アプリを最新版に更新してください。</string>
+    <string name="error_unknown">予期しないエラーが発生しました。</string>
+    <string name="error_unauthorized">ログインが必要です。</string>
+    <string name="error_forbidden">この操作の権限がありません。</string>
+    <string name="error_not_found">見つかりませんでした。</string>
+    <string name="error_rate_limited">操作が多すぎます。しばらく待ってからお試しください。</string>
+    <string name="error_server">サーバーでエラーが発生しました（%1$d）</string>
+
+    <!-- ホーム -->
+    <string name="home_welcome">ようこそ！</string>
+    <string name="home_order_title">注文する</string>
+    <string name="home_order_body">やきうどんなどをスマートフォンから注文できます</string>
+    <string name="home_planetarium_title">プラネタリウム</string>
+    <string name="home_planetarium_body">上映時間・空席の確認と予約</string>
+    <string name="home_mine_title">マイチケット・クーポン</string>
+    <string name="home_mine_body_empty">注文・予約・クーポンがここに保存されます</string>
+    <string name="home_mine_body_count">保存済み %1$d 件</string>
+    <string name="home_staff">スタッフはこちら</string>
+    <string name="home_staff_logged_in">スタッフ（%1$s さん）</string>
+
+    <!-- 営業・販売状態 -->
+    <string name="business_before">営業前</string>
+    <string name="business_open">営業中</string>
+    <string name="business_paused">一時停止中</string>
+    <string name="business_closed">営業終了</string>
+    <string name="sale_on_sale">販売中</string>
+    <string name="sale_sold_out">売り切れ</string>
+    <string name="sale_stopped">販売停止中</string>
+
+    <!-- 注文 -->
+    <string name="order_departments_title">注文するお店</string>
+    <string name="order_departments_empty">注文できるお店はありません</string>
+    <string name="order_mobile_on">スマホ注文OK</string>
+    <string name="order_mobile_off">スマホ注文なし</string>
+    <string name="order_menu_title">メニュー</string>
+    <string name="order_menu_empty">現在ご注文いただける商品はありません</string>
+    <string name="order_not_accepting">現在、スマートフォンからの注文を受け付けていません。店頭でご注文ください。</string>
+    <string name="order_site_code_hint_menu">注文の確定時に、会場の画面に表示されている3桁の確認コードが必要です。</string>
+    <string name="order_variant_unavailable">この組み合わせは販売していません</string>
+    <string name="order_add_to_cart">カートに入れる</string>
+    <string name="order_cart_button">カートを見る（%1$d点・%2$s）</string>
+
+    <string name="checkout_title">注文内容の確認</string>
+    <string name="checkout_empty">カートは空です</string>
+    <string name="checkout_cart_heading">カート</string>
+    <string name="checkout_remove">削除</string>
+    <string name="checkout_quote_heading">お支払い金額（サーバーで計算）</string>
+    <string name="checkout_quote_line">%1$s %2$s × %3$d</string>
+    <string name="checkout_total">合計</string>
+    <string name="checkout_pay_at_counter">お支払いは受け取り時に店頭で行います。</string>
+    <string name="checkout_submit">注文を確定する</string>
+    <string name="checkout_submit_retry">もう一度送信する</string>
+    <string name="site_code_heading">確認コード</string>
+    <string name="site_code_help">会場の画面に表示されている3桁の数字を入力してください。</string>
+    <string name="site_code_label">3桁の数字</string>
+    <string name="site_code_count">%1$d / 3桁</string>
+
+    <string name="order_status_title">注文状況</string>
+    <string name="order_call_number">呼出番号</string>
+    <string name="order_headline_cancelled">取消済み</string>
+    <string name="order_headline_handed">お受け取り済み</string>
+    <string name="order_headline_ready">お受け取りいただけます</string>
+    <string name="order_headline_cooking">調理中です</string>
+    <string name="order_headline_waiting">受付済み・調理待ち</string>
+    <string name="order_ready_unpaid">店頭でお支払いのうえ、お受け取りください。</string>
+    <string name="order_ready_note">店頭で呼出番号をお伝えください。</string>
+    <string name="order_pay_at_counter">店頭で呼出番号をお伝えのうえ、お支払いください。</string>
+    <string name="order_created_at">注文日時：%1$s</string>
+    <string name="order_items_heading">ご注文の商品</string>
+    <string name="order_item_qty_price">%1$d個・%2$s</string>
+    <string name="order_discount">割引</string>
+    <string name="order_cancel">注文を取り消す</string>
+    <string name="order_cancel_note">調理開始前・お支払い前のみ取り消せます。</string>
+    <string name="order_cancel_ask_staff">取消・変更はお店のスタッフにお申し出ください。</string>
+    <string name="order_cancel_confirm_title">注文を取り消しますか？</string>
+    <string name="order_cancel_confirm_message">取り消した注文は元に戻せません。</string>
+    <string name="order_status_accepted">受付済み</string>
+    <string name="order_status_cancelled">取消</string>
+    <string name="order_status_completed">完了</string>
+    <string name="payment_unpaid">未払い</string>
+    <string name="payment_paid">支払済み</string>
+    <string name="payment_partially_refunded">一部返金</string>
+    <string name="payment_refunded">返金済み</string>
+    <string name="cook_waiting">調理待ち</string>
+    <string name="cook_cooking">調理中</string>
+    <string name="cook_cooked">調理済み</string>
+    <string name="cook_cancelled">取消</string>
+    <string name="cook_not_required">調理不要</string>
+
+    <!-- プラネタリウム -->
+    <string name="planetarium_title">プラネタリウム上映</string>
+    <string name="planetarium_legend">○ 空席あり　△ 残りわずか　× 満席</string>
+    <string name="planetarium_empty">公開中の上映はありません</string>
+    <string name="seat_available">空席あり</string>
+    <string name="seat_few">残りわずか</string>
+    <string name="seat_full">満席</string>
+    <string name="run_scheduled">開催予定</string>
+    <string name="run_running">上映中</string>
+    <string name="run_finished">上映終了</string>
+    <string name="run_cancelled">上映中止</string>
+    <string name="screening_title">上映の詳細</string>
+    <string name="screening_when">%1$s %2$s〜%3$s</string>
+    <string name="screening_walkin_yes">当日枠：空きあり（会場受付でお申し出ください）</string>
+    <string name="screening_walkin_no">当日枠：空きなし</string>
+    <string name="screening_cannot_reserve">この上映は現在、事前予約できません</string>
+    <string name="reserve_heading">予約する</string>
+    <string name="reserve_name">お名前</string>
+    <string name="reserve_name_help">受付で確認します（30文字まで）</string>
+    <string name="reserve_party">人数</string>
+    <string name="reserve_party_max">最大%1$d人</string>
+    <string name="reserve_note">予約後に表示されるQRコードを、入場時に受付でご提示ください。</string>
+    <string name="reserve_submit">予約を確定する</string>
+    <string name="reserve_submit_retry">もう一度送信する</string>
+
+    <string name="reservation_title">予約の確認</string>
+    <string name="reservation_screening_cancelled">この上映は中止になりました。</string>
+    <string name="reservation_cancel_reason">理由：%1$s</string>
+    <string name="reservation_no">予約番号：%1$s</string>
+    <string name="reservation_name_party">%1$s さま・%2$d名</string>
+    <string name="reservation_qr_help">入場時に、1人1枚ずつQRコードを受付でご提示ください。</string>
+    <string name="reservation_coupons">発行されたクーポン</string>
+    <string name="reservation_cancel">予約を取り消す</string>
+    <string name="reservation_cancel_confirm_title">予約を取り消しますか？</string>
+    <string name="reservation_cancel_confirm_message">取り消すと席が解放され、元に戻せません。</string>
+    <string name="reservation_keep_link">この画面は「マイチケット」からいつでも開けます。アプリを削除すると表示できなくなるため、予約時のURLも控えておいてください。</string>
+    <string name="reservation_confirmed">予約確定</string>
+    <string name="reservation_cancelled_self">取消済み（ご本人）</string>
+    <string name="reservation_cancelled_staff">取消済み（スタッフ）</string>
+    <string name="reservation_cancelled_screening">取消済み（上映中止）</string>
+    <string name="ticket_label">チケット %1$d（%2$s）</string>
+    <string name="ticket_admitted">入場済み</string>
+    <string name="ticket_admitted_at">入場：%1$s</string>
+    <string name="ticket_void">無効</string>
+    <string name="ticket_valid">未入場</string>
+    <string name="ticket_qr_description">チケット%1$sの入場用QRコード</string>
+    <string name="ticket_number_fallback">QRが読めない場合のチケット番号：%1$s</string>
+
+    <!-- クーポン -->
+    <string name="coupon_title">クーポン</string>
+    <string name="coupon_remaining">残り %1$d人分（全%2$d人分）</string>
+    <string name="coupon_valid_until">有効期限：%1$s</string>
+    <string name="coupon_no">クーポン番号：%1$s</string>
+    <string name="coupon_qr_description">クーポンのQRコード</string>
+    <string name="coupon_qr_help">お会計の前にスタッフへご提示ください。表示しただけでは使用されません。</string>
+    <string name="coupon_not_usable">このクーポンは現在ご利用いただけません。</string>
+    <string name="coupon_status_active">利用可能</string>
+    <string name="coupon_status_used">使用済み</string>
+    <string name="coupon_status_revoked">無効</string>
+
+    <!-- マイチケット -->
+    <string name="mine_title">マイチケット・クーポン</string>
+    <string name="mine_help">この端末で注文・予約・表示したものが保存されます。</string>
+    <string name="mine_empty">保存されたものはありません</string>
+    <string name="mine_orders">注文</string>
+    <string name="mine_reservations">プラネタリウム予約</string>
+    <string name="mine_coupons">クーポン</string>
+    <string name="mine_order_sub">呼出番号 %1$s</string>
+    <string name="mine_delete">削除</string>
+    <string name="mine_delete_title">一覧から削除しますか？</string>
+    <string name="mine_delete_message">この端末の一覧から消えるだけで、注文・予約は取り消されません。URLが無いと再表示できなくなります。</string>
+
+    <!-- スタッフ -->
+    <string name="staff_title">スタッフ</string>
+    <string name="login_heading">スタッフログイン</string>
+    <string name="login_id">ログインID</string>
+    <string name="login_password">パスワード</string>
+    <string name="login_submit">ログイン</string>
+    <string name="login_note">ログイン情報は他の人に教えないでください。共用端末では使い終わったら必ずログアウトしてください。</string>
+    <string name="staff_logged_in_as">%1$s さん</string>
+    <string name="staff_roles">権限：%1$s</string>
+    <string name="staff_menu_checkin">入場チェックイン（QR読取）</string>
+    <string name="staff_menu_coupon">クーポン確認（QR読取）</string>
+    <string name="staff_menu_kitchen">キッチン</string>
+    <string name="staff_menu_web">その他の業務をブラウザで開く</string>
+    <string name="staff_web_note">会計・受け渡し・当日受付・管理などはWebのスタッフ画面で行います。</string>
+    <string name="staff_no_app_features">アプリで使える機能はありません。Webのスタッフ画面をご利用ください。</string>
+    <string name="staff_logout">ログアウト</string>
+    <string name="staff_need_login">この画面を使うにはスタッフログインが必要です。</string>
+    <string name="staff_no_permission">この画面を使う権限がありません。</string>
+    <string name="role_admin">管理者</string>
+    <string name="role_cashier">会計</string>
+    <string name="role_kitchen">キッチン</string>
+    <string name="role_reception">プラネ受付</string>
+    <string name="role_treasurer">会計責任者</string>
+    <string name="role_display">表示端末</string>
+    <string name="role_member">部員</string>
+
+    <string name="camera_permission_title">カメラの使用許可</string>
+    <string name="camera_permission_body">QRコードを読み取るためにカメラを使用します。</string>
+    <string name="camera_permission_denied">カメラが許可されていません。下の手入力を使うか、設定からカメラを許可してください。</string>
+    <string name="camera_permission_request">カメラを許可する</string>
+    <string name="camera_permission_settings">設定を開く</string>
+
+    <!-- チェックイン -->
+    <string name="checkin_title">入場チェックイン</string>
+    <string name="checkin_auto_confirm">「入場できます」なら自動で入場確定する</string>
+    <string name="checkin_scan_help">チケットのQRコードを枠内に映してください</string>
+    <string name="checkin_verifying">確認中…</string>
+    <string name="checkin_confirming">入場を確定しています…</string>
+    <string name="checkin_confirm">入場を確定する</string>
+    <string name="checkin_next">次を読み取る</string>
+    <string name="checkin_not_yet_confirmed">まだ入場は確定していません</string>
+    <string name="checkin_result_ok">入場できます</string>
+    <string name="checkin_result_admitted">入場OK</string>
+    <string name="checkin_result_already">入場済み</string>
+    <string name="checkin_result_cancelled">取消済み</string>
+    <string name="checkin_result_wrong">別の上映回</string>
+    <string name="checkin_result_screening_cancelled">上映中止</string>
+    <string name="checkin_result_finished">上映終了</string>
+    <string name="checkin_result_not_found">見つかりません</string>
+    <string name="checkin_ticket_no">チケット番号：%1$s</string>
+    <string name="checkin_ticket_screening">%1$s %2$s</string>
+    <string name="checkin_ticket_reservation">予約 %1$s・%2$s さま・%3$d名</string>
+    <string name="checkin_ticket_admitted_at">入場時刻：%1$s</string>
+    <string name="checkin_screening_any">上映回：指定しない（すべて）</string>
+    <string name="checkin_screening_selected">上映回：%1$s %2$s</string>
+    <string name="checkin_screening_option">%1$s %2$s（入場 %3$d / 確保 %4$d）</string>
+    <string name="checkin_manual_heading">チケット番号で確認（QRが読めないとき）</string>
+    <string name="checkin_manual_label">チケット番号</string>
+    <string name="checkin_manual_placeholder">例：17-003-1</string>
+    <string name="checkin_manual_submit">番号で確認する</string>
+
+    <!-- クーポン確認 -->
+    <string name="coupon_verify_title">クーポン確認</string>
+    <string name="coupon_verify_note">読み取るだけではクーポンは使用されません。適用・会計確定はWebの会計画面で行ってください。</string>
+    <string name="coupon_verify_busy">確認中…</string>
+    <string name="coupon_verify_usable">利用できます</string>
+    <string name="coupon_verify_not_usable">利用できません</string>
+    <string name="coupon_verify_status">状態：%1$s</string>
+    <string name="coupon_verify_not_splittable">分割利用不可：今回使わなかった人数分は持ち越せません</string>
+    <string name="coupon_verify_manual_heading">手入力で確認</string>
+    <string name="coupon_verify_manual_label">クーポンのURLまたはコード</string>
+    <string name="coupon_verify_manual_submit">確認する</string>
+
+    <!-- キッチン -->
+    <string name="kitchen_title">キッチン</string>
+    <string name="kitchen_department">部門：%1$s</string>
+    <string name="kitchen_empty">調理待ちの注文はありません</string>
+    <string name="kitchen_elapsed">経過 %1$s</string>
+    <string name="kitchen_cancelled">取消</string>
+    <string name="kitchen_unpaid">未払い</string>
+    <string name="kitchen_unpaid_long">未払い（長時間）</string>
+    <string name="kitchen_long_wait">長時間経過</string>
+    <string name="kitchen_item">%1$s × %2$d</string>
+    <string name="kitchen_action_start">調理開始</string>
+    <string name="kitchen_action_done">調理完了</string>
+    <string name="kitchen_action_back_waiting">待ちに戻す</string>
+    <string name="kitchen_action_back_cooking">調理中に戻す</string>
+</resources>

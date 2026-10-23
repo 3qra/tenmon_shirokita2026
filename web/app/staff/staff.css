@@ -1,0 +1,105 @@
+/* スタッフ業務画面の追加スタイル（globals.css の変数を使う） */
+
+/* セグメント切替（部門・フィルタ等）。選択中は色に加えて●で示す */
+.seg { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.seg button {
+  min-height: var(--tap); padding: 0 14px; border-radius: 10px; border: 2px solid var(--border);
+  background: var(--surface); color: var(--text); font-size: 1rem; font-weight: 600; cursor: pointer; touch-action: manipulation;
+}
+.seg button.seg-on { border-color: var(--primary); background: var(--primary); color: var(--primary-ink); }
+
+.reason-box { border: 1px dashed var(--border); border-radius: 10px; padding: 10px; margin: 8px 0; background: var(--surface-2); }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.actions > * { flex: 1 1 auto; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 8px 0; }
+.kv dt { color: var(--muted); font-size: 0.9rem; }
+.kv dd { margin: 0; font-weight: 600; }
+.big-num { font-size: 2rem; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.strike { text-decoration: line-through; opacity: 0.7; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+.section-title { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* ホーム */
+.home-cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+.home-card { display: flex; flex-direction: column; gap: 4px; min-height: 96px; padding: 14px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); text-decoration: none; color: var(--text); }
+.home-card strong { font-size: 1.1rem; }
+.home-card small { color: var(--muted); }
+.home-card:hover, .home-card:focus-visible { border-color: var(--primary); }
+
+/* 対面注文：商品タイル */
+.ptiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.ptile {
+  position: relative; display: flex; flex-direction: column; align-items: flex-start; justify-content: space-between; gap: 4px;
+  min-height: 96px; padding: 12px; border-radius: var(--radius); border: 2px solid var(--border); background: var(--surface);
+  color: var(--text); text-align: left; font-size: 1rem; cursor: pointer; touch-action: manipulation;
+}
+.ptile .pname { font-weight: 800; font-size: 1.05rem; line-height: 1.3; }
+.ptile .plabel { font-weight: 700; color: var(--primary); }
+.ptile .pprice { font-weight: 700; font-variant-numeric: tabular-nums; }
+.ptile.sold { border-style: dashed; background: var(--surface-2); color: var(--muted); }
+.ptile.edit { border-color: var(--warn); }
+.ptile .incart { position: absolute; top: 6px; right: 6px; background: var(--primary); color: var(--primary-ink); border-radius: 999px; min-width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; padding: 0 6px; }
+.cart-line { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.cart-bar { position: sticky; bottom: 0; background: var(--surface); border-top: 2px solid var(--border); padding: 12px 16px; margin: 12px -16px 0; z-index: 5; }
+
+/* 会計パネル */
+.pay-total { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.pay-total.grand { font-size: 1.4rem; font-weight: 800; border-bottom: 2px solid var(--text); }
+.quick { display: grid; gap: 6px; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); margin: 6px 0; }
+.amount-input { font-size: 1.6rem; font-weight: 800; text-align: right; font-variant-numeric: tabular-nums; }
+.change-box { border: 3px solid var(--ok); background: var(--ok-bg); color: var(--ok); border-radius: var(--radius); padding: 12px 16px; margin: 10px 0; display: flex; justify-content: space-between; align-items: baseline; }
+.change-box.short { border-color: var(--danger); background: var(--danger-bg); color: var(--danger); }
+.change-box .big-num { font-size: 2.4rem; }
+.coupon-card { border: 2px solid var(--info); border-radius: var(--radius); padding: 10px 12px; margin: 8px 0; background: var(--info-bg); }
+.coupon-card.bad { border-color: var(--danger); background: var(--danger-bg); }
+
+/* 注文一覧 */
+.orow { display: grid; grid-template-columns: 72px 1fr auto; gap: 10px; align-items: center; width: 100%; text-align: left; padding: 12px; margin: 8px 0; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 1rem; cursor: pointer; }
+.orow.unpaid { border: 2px dashed var(--warn); }
+.orow.cancelled { opacity: 0.6; }
+.orow .ono { font-size: 1.8rem; font-weight: 800; text-align: center; font-variant-numeric: tabular-nums; }
+.orow .badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+
+/* キッチン */
+.k-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.kcard .kno { font-size: 3rem; line-height: 1; }
+.kcard .kmeta { text-align: right; font-size: 1rem; }
+.kcard .kel { font-size: 1.3rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.kitem .opts { font-size: 1rem; font-weight: 700; color: var(--primary); }
+.kitem .kst { font-size: 0.9rem; }
+.kbtns { display: flex; flex-direction: column; gap: 6px; min-width: 132px; }
+.kbtn { min-height: 64px; font-size: 1.15rem; width: 100%; }
+.kbtn-corr { min-height: 40px; font-size: 0.9rem; }
+.kfeedback { font-size: 0.85rem; font-weight: 700; text-align: center; }
+.kfeedback.ok { color: var(--ok); }
+.kfeedback.ng { color: var(--danger); }
+.kcard.done { opacity: 0.75; }
+.kcard.cancelled .kitem .name { text-decoration: line-through; }
+.kstamp { display: inline-block; font-size: 1.4rem; font-weight: 900; color: var(--danger); border: 3px solid var(--danger); padding: 0 10px; border-radius: 8px; transform: rotate(-4deg); }
+
+/* 受付 */
+.result .ticket-no { font-size: 1.6rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.result .mark { font-size: 3rem; font-weight: 900; line-height: 1; }
+.qr-grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+.stepper { display: flex; align-items: center; gap: 12px; }
+.stepper button { width: 64px; min-height: 64px; font-size: 1.6rem; }
+.stepper output { font-size: 2rem; font-weight: 800; min-width: 2ch; text-align: center; font-variant-numeric: tabular-nums; }
+.rrow { display: block; width: 100%; text-align: left; padding: 12px; margin: 8px 0; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 1rem; cursor: pointer; }
+
+/* シフト */
+.slot { border-left: 6px solid var(--border); }
+.slot.mine { border-left-color: var(--primary); }
+.pref button { flex: 1 1 0; }
+
+/* 通知 */
+.notif-item { display: block; width: 100%; text-align: left; padding: 12px; margin: 8px 0; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 1rem; cursor: pointer; }
+.notif-item.unread { border-left: 6px solid var(--primary); }
+
+@media (max-width: 420px) {
+  .orow { grid-template-columns: 56px 1fr; }
+  .orow > :last-child { grid-column: 1 / -1; text-align: right; }
+  .kbtns { min-width: 112px; }
+  .kitem { grid-template-columns: 1fr; }
+  .kbtns { flex-direction: row; flex-wrap: wrap; }
+  .kbtns > * { flex: 1 1 45%; }
+}

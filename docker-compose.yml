@@ -1,0 +1,78 @@
+# 学祭部活ポータル
+# 起動: cp .env.example .env（値を設定）→ docker compose up -d --build
+name: gakusai
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gakusai}
+      POSTGRES_USER: ${POSTGRES_USER:-gakusai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD を .env に設定してください}
+      TZ: UTC
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # DBは外部に公開しない
+
+  api:
+    build: ./api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-gakusai}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-gakusai}?sslmode=disable
+      APP_SECRET: ${APP_SECRET:?APP_SECRET を .env に設定してください（32文字以上）}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost}
+      TRUST_PROXY: "true"
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      SESSION_TTL: ${SESSION_TTL:-18h}
+      BOOTSTRAP_ADMIN_LOGIN: ${BOOTSTRAP_ADMIN_LOGIN:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      WALLET_PASS_TYPE_ID: ${WALLET_PASS_TYPE_ID:-}
+      WALLET_TEAM_ID: ${WALLET_TEAM_ID:-}
+      WALLET_ORG_NAME: ${WALLET_ORG_NAME:-天文学研究部}
+      WALLET_VENUE_NAME: ${WALLET_VENUE_NAME:-プラネタリウム会場}
+      WALLET_CERT_PATH: ${WALLET_CERT_PATH:-}
+      WALLET_KEY_PATH: ${WALLET_KEY_PATH:-}
+      WALLET_WWDR_PATH: ${WALLET_WWDR_PATH:-}
+    volumes:
+      # Wallet の証明書・秘密鍵（イメージに焼き込まない。リポジトリにも入れない）
+      - ./secrets/wallet:/run/secrets/wallet:ro
+
+  web:
+    build: ./web
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      API_INTERNAL_URL: http://api:8080
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+      - web
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/well-known:/srv/well-known:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:

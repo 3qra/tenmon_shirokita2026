@@ -1,0 +1,12 @@
+.env
+secrets/*
+!secrets/README.md
+!secrets/wallet/
+secrets/wallet/*
+!secrets/wallet/.gitkeep
+backups/
+*.pkpass
+*.p12
+*.pem
+*.key
+.DS_Store

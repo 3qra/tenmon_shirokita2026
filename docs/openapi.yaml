@@ -1,0 +1,4674 @@
+openapi: 3.1.0
+info:
+  title: 学祭部活ポータル API
+  version: 1.0.0
+  summary: 模擬店モバイルオーダー・プラネタリウム予約・現金管理・シフト管理のREST API
+  description: |
+    Go 実装（`api/internal/app`）に基づく仕様。ルーティングは `routes.go`。
+
+    ## 共通事項
+
+    * 金額はすべて整数の円。時刻は RFC 3339（タイムゾーン付き）。営業日（`business_day`）は Asia/Tokyo 基準の `YYYY-MM-DD`。
+    * リクエスト本文は JSON（最大 1 MiB）。**未知のフィールドは拒否**（`400 bad_request`）。空本文は `{}` として扱う。
+    * パス中の `{id}` 等の UUID が UUID 形式でない場合は `404 not_found` を返す（`pathID`）。
+    * 応答には `Cache-Control: no-store`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`X-Frame-Options: DENY` が付く。
+    * CORS は `ALLOWED_ORIGINS` に列挙したオリジンのみ（資格情報付き）。
+
+    ## 認証（スタッフ）
+
+    `POST /auth/login` 成功時に HttpOnly Cookie `gs_session`（SameSite=Lax）を設定し、同じ値を `token` として返す。
+    アプリ等は `Authorization: Bearer <token>` で送ってもよい（Bearer が優先、無ければ Cookie）。
+    セッション期限は既定 18 時間（`SESSION_TTL`）。
+
+    権限（ロール）: `admin`, `treasurer`, `cashier`, `kitchen`, `reception`, `member`, `display`。
+    各操作の必要権限は `x-roles`（いずれか1つを持てばよい）と説明文に記載。`x-roles: []` はログインのみ必要。
+    ログインしていなければ `401 unauthorized`、権限不足は `403 forbidden`。
+
+    ## CSRF 対策
+
+    `/api/` 配下の GET/HEAD/OPTIONS 以外の要求で、`Authorization: Bearer ...` ヘッダが**無い**場合は
+    `X-Requested-With` ヘッダ（値は任意・空でないこと）が必須。無ければ `403 csrf`。
+    `Bearer ` で始まらない `Authorization` ヘッダでは免除されない。
+    これは来場者向け公開 API（Cookie `gs_cid` を使う）にも適用される。
+
+    ## 冪等性キー（Idempotency-Key）
+
+    `Idempotency-Key` ヘッダ必須の操作がある（各操作に `x-idempotent: true` と記載）。
+    * ヘッダが無い／200 文字超 → `400 bad_request`。
+    * キー空間は「操作種別 + 呼び出し主体（セッショントークン・`X-Client-Id`・Cookie `gs_cid` のハッシュ）」で分かれる。
+      セッションも `X-Client-Id` も有効な `gs_cid`（16 文字以上）も無い来場者の要求では、冪等性処理の前に
+      `gs_cid` を新規発行（`Set-Cookie`）してから主体を決めるため、別の来場者同士でキーが衝突しない。
+    * 同じキー・同じ内容（メソッド + パス + 本文のハッシュが一致）→ 保存済みの応答（ステータス・本文）を再送し、
+      `Idempotent-Replay: true` ヘッダを付ける（初回のその他のヘッダ、例えば `Set-Cookie` は再送されない）。
+    * 同じキー・異なる内容 → `422 idempotency_mismatch`。
+    * 同じキーの要求が処理中 → `409 in_progress`。
+    * 初回処理が 5xx / 409 / 429 で終わった場合は記録を消すので、同じキーで再試行できる。
+      それ以外（2xx・400・401・403・404・422 など）は保存され、以後は再送される。
+    * スタッフ用の操作（`/staff/*`, `/treasurer/*`）は**認証・権限確認の後**に冪等性処理を行う。
+      401/403 は記録されず、同じキーでログイン後に再試行できる。
+
+    ## 来場者識別
+
+    注文作成・予約作成で来場者を識別する（同一人物の断定には使わない。上限・ブロック判定用）。
+    * アプリ: `X-Client-Id`（16〜200 文字）と `X-Client-Kind`（`appclip` | `ios` | `android`）を送る。
+      `X-Client-Id` があるのに `X-Client-Kind` が不正なら `400`。
+    * Web: Cookie `gs_cid`（16〜100 文字）。`X-Client-Id` が無く有効な `gs_cid` も無い場合、
+      `GET /api/v1/public/*` の任意の要求、および冪等性キー付きの公開 POST（注文・予約作成）で
+      新たに発行して `Set-Cookie`（30 日, Path=/, HttpOnly, SameSite=Lax）する。
+      注文・予約の作成前に公開 GET を 1 回呼んでおけば識別が安定する。
+
+    ## エラー形式
+
+    すべてのエラーは `{"error": {"code": "...", "message": "...", "details": {...}}}`。
+    `message` は利用者に表示できる日本語。`code` は機械判定用（一覧は `components.schemas.ErrorCode`）。
+    DB 制約違反は汎用コードに変換される: 一意制約 `409 duplicate`、CHECK 制約 `400 invalid_value`、
+    排他制約 `409 overlap`、外部キー `400 bad_request`、型不正 `400 bad_request`、
+    直列化失敗・デッドロック（再試行後） `409 retry`、それ以外は `500 internal`。
+
+    ## リアルタイム通知（SSE）
+
+    `GET /events` は「どのトピックが変わったか」だけを配信する。受信側は該当 API を取り直す。
+    トピック: `orders:<departmentId>`, `screenings`, `cash`, `shifts`, `products`, `departments`, `resync`。
+  contact:
+    name: 天文学研究部
+servers:
+  - url: /api/v1
+    description: 同一オリジンの API（相対パス）
+tags:
+  - name: common
+    description: 共通
+  - name: auth
+    description: 認証・本人
+  - name: public
+    description: 来場者向け（ログイン不要）
+  - name: display
+    description: 表示端末
+  - name: staff-orders
+    description: スタッフ：注文・会計・キッチン・クーポン読取
+  - name: staff-planetarium
+    description: スタッフ：プラネタリウム受付
+  - name: staff-cash
+    description: スタッフ：現金
+  - name: treasurer
+    description: 会計責任者
+  - name: shifts
+    description: シフト・通知
+  - name: admin
+    description: 管理
+
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+
+paths:
+  # ------------------------------------------------------------------
+  # 共通
+  # ------------------------------------------------------------------
+  /healthz:
+    servers:
+      - url: /
+        description: API プレフィックスなし
+    get:
+      tags: [common]
+      operationId: healthz
+      summary: ヘルスチェック
+      description: DB に ping する。`/api/v1` の外（`/healthz`）にある。
+      security: []
+      x-roles: public
+      responses:
+        '200':
+          description: 正常
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, time]
+                properties:
+                  ok: { type: boolean, const: true }
+                  time: { type: string, format: date-time }
+        '503':
+          description: DB に接続できない
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, db]
+                properties:
+                  ok: { type: boolean, const: false }
+                  db: { type: string, description: DB エラー文字列 }
+
+  /events:
+    get:
+      tags: [common]
+      operationId: streamEvents
+      summary: 変更通知ストリーム（SSE）
+      description: |
+        Server-Sent Events。認証不要。接続直後に `hello`、以後 15 秒ごとに `ping` を送る。
+        変更があると `event: change` で `data` にトピック名を送る。
+
+        ```
+        event: hello
+        data: 1760610000
+
+        event: ping
+        data: 1760610015
+
+        event: change
+        data: orders:b5092b0f-bc95-4b8e-bb83-505e79438a54
+        ```
+
+        * `hello` / `ping` の `data` はサーバー時刻（Unix 秒）。
+        * `change` の `data`: `orders:<departmentId>`（注文・調理・会計・返金・受渡）、`screenings`（上映・予約・入場）、
+          `cash`（入金・返金・現金移動・精算）、`shifts`、`products`、`departments`、`resync`。
+        * `resync` は DB 通知の再接続時などに送られ、`topics` の指定にかかわらず常に届く。受信側は全件を取り直すこと。
+        * 遅い購読者への通知は取りこぼされることがある。切断時は再接続して全件再取得する。
+      security: []
+      x-roles: public
+      parameters:
+        - name: topics
+          in: query
+          required: false
+          description: |
+            購読するトピックのカンマ区切り。`orders` のように `:` より前の基底名を指定すると `orders:*` すべてに一致する。
+            `orders:<departmentId>` のように完全一致でもよい。省略時はすべて。
+          schema: { type: string }
+          example: orders,screenings
+      responses:
+        '200':
+          description: 'イベントストリーム（`X-Accel-Buffering: no`）'
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                stream:
+                  value: "event: hello\ndata: 1760610000\n\nevent: change\ndata: screenings\n\n"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /business-days:
+    get:
+      tags: [common]
+      operationId: listBusinessDays
+      summary: 営業日一覧と今日の営業日
+      security: []
+      x-roles: public
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BusinessDaysResponse' }
+
+  # ------------------------------------------------------------------
+  # 認証
+  # ------------------------------------------------------------------
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: ログイン
+      description: |
+        成功時に Cookie `gs_session` を設定し、同じ値を `token` で返す。
+        IP あたり 10 回/分（`429 rate_limited`）。同じ login_id の失敗が 15 分以内に 10 回で `429 locked`。
+        無効化された部員・存在しない ID・パスワード誤りは区別せず `401 invalid_credentials`。
+      security: []
+      x-roles: public
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                login_id: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: ログイン成功
+          headers:
+            Set-Cookie:
+              description: '`gs_session=<token>; Path=/; HttpOnly; SameSite=Lax`'
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: ログアウト
+      description: セッションを削除し Cookie を消す。未ログインでも 200。
+      security: []
+      x-roles: public
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /auth/me:
+    get:
+      tags: [auth]
+      operationId: me
+      summary: ログイン中のスタッフと未読通知数
+      x-roles: []
+      description: '必要権限: ログインのみ'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [staff, unread_notifications]
+                properties:
+                  staff: { $ref: '#/components/schemas/Staff' }
+                  unread_notifications: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/password:
+    post:
+      tags: [auth]
+      operationId: changePassword
+      summary: 自分のパスワード変更
+      description: |
+        必要権限: ログインのみ。新パスワードは 8 文字以上。現在のパスワード誤りは `400 invalid_credentials`。
+        成功すると現在のセッション以外のセッションを無効化する。
+      x-roles: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [current, new]
+              properties:
+                current: { type: string }
+                new: { type: string, minLength: 8 }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ------------------------------------------------------------------
+  # 来場者（公開）
+  # ------------------------------------------------------------------
+  /public/departments:
+    get:
+      tags: [public]
+      operationId: publicListDepartments
+      summary: 部門一覧
+      security: []
+      x-roles: public
+      responses:
+        '200':
+          description: OK（`sort_order`, `name` 順）
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Department' }
+
+  /public/departments/{id}/products:
+    get:
+      tags: [public]
+      operationId: publicCatalog
+      summary: 部門の商品カタログ（来場者向け）
+      description: 公開・有効な商品／選択肢／バリエーションのみ。無効な選択肢を含むバリエーションは除外。
+      security: []
+      x-roles: public
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CatalogResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /public/departments/{id}/board:
+    get:
+      tags: [public]
+      operationId: publicBoard
+      summary: 呼出番号ボード
+      description: 今日の注文のうち、調理中（cooking）と受渡可能（ready）の呼出番号のみ。
+      security: []
+      x-roles: public
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BoardResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /public/orders/quote:
+    post:
+      tags: [public]
+      operationId: publicQuote
+      summary: 注文金額の見積（来場者）
+      description: 価格・販売状態をサーバー側で検証する。IP あたり 60 回/分（バースト 30）。
+      security: []
+      x-roles: public
+      parameters:
+        - $ref: '#/components/parameters/XRequestedWith'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [department_id, items]
+              properties:
+                department_id: { type: string, format: uuid }
+                items:
+                  type: array
+                  items: { $ref: '#/components/schemas/ItemRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, subtotal]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/PricedItem' }
+                  subtotal: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /public/orders:
+    post:
+      tags: [public]
+      operationId: publicCreateOrder
+      summary: モバイル注文の作成（来場者）
+      description: |
+        `Idempotency-Key` 必須。来場者識別（`X-Client-Id`+`X-Client-Kind` または Cookie `gs_cid`）を使う。
+        * IP あたり `orders_per_minute` 回/分（設定値）。
+        * ブロック中の識別は `403 forbidden`。
+        * 部門が `site_code_enabled` の場合、会場表示の 3 桁コード `site_code` が必要（誤り `422 site_code_invalid`、
+          失敗が `site_code_fail_limit` 回（IP 単位は 4 倍）続くと `429 site_code_locked`）。
+        * 部門が営業中でない `422 not_open`、モバイル受付停止 `422 mobile_order_off`、
+          未払い注文が `max_unpaid_orders` 件以上 `422 too_many_unpaid`、数量合計が `max_items_per_order` 超 `422 too_many_items`。
+        * 商品の不正 `422 invalid_item` / `item_unavailable` / `sold_out` / `item_stopped`。
+        応答の `access_token` は注文状況確認用の秘密トークン（再表示不可）。
+      security: []
+      x-roles: public
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/XRequestedWith'
+        - $ref: '#/components/parameters/XClientId'
+        - $ref: '#/components/parameters/XClientKind'
+        - $ref: '#/components/parameters/ClientCookie'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [department_id, items]
+              properties:
+                department_id: { type: string, format: uuid }
+                items:
+                  type: array
+                  minItems: 1
+                  items: { $ref: '#/components/schemas/ItemRequest' }
+                site_code:
+                  type: string
+                  description: 会場に表示された 3 桁の確認コード（部門で有効な場合のみ必要）
+                  example: '042'
+                channel:
+                  type: string
+                  enum: ['', web, appclip, ios, android]
+                  default: web
+      responses:
+        '201':
+          description: 作成
+          headers:
+            Set-Cookie:
+              description: 来場者 Cookie `gs_cid` を新規発行した場合
+              schema: { type: string }
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicOrderCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /public/orders/by-token/{token}:
+    get:
+      tags: [public]
+      operationId: publicGetOrder
+      summary: 注文状況（来場者・トークン）
+      description: IP あたり 120 回/分（バースト 60）。
+      security: []
+      x-roles: public
+      parameters:
+        - $ref: '#/components/parameters/TokenPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /public/orders/by-token/{token}/cancel:
+    post:
+      tags: [public]
+      operationId: publicCancelOrder
+      summary: 注文の本人取消
+      description: |
+        受付中（accepted）・未払い・調理開始前の注文のみ。
+        取消不可 `409 not_cancellable`、支払済み `409 paid`、調理開始済み `409 cooking_started`。
+      security: []
+      x-roles: public
+      parameters:
+        - $ref: '#/components/parameters/TokenPath'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: 取消後の注文
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /public/screenings:
+    get:
+      tags: [public]
+      operationId: publicListScreenings
+      summary: 上映一覧（来場者）
+      description: 公開かつ終了前（`ends_at > now`）の上映。定員の内訳は返さず記号と可否のみ。
+      security: []
+      x-roles: public
+      parameters:
+        - $ref: '#/components/parameters/DayQuery'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [screenings, server_time]
+                properties:
+                  screenings:
+                    type: array
+                    items: { $ref: '#/components/schemas/PublicScreening' }
+                  server_time: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /public/screenings/{id}:
+    get:
+      tags: [public]
+      operationId: publicGetScreening
+      summary: 上映詳細（来場者）
+      description: 非公開の上映は 404。
+      security: []
+      x-roles: public
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicScreeningDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /public/screening-board:
+    get:
+      tags: [public]
+      operationId: publicScreeningBoard
+      summary: 上映案内ボード（今日・終了前の公開上映を最大 12 件）
+      security: []
+      x-roles: public
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [screenings, server_time]
+                properties:
+                  screenings:
+                    type: array
+                    maxItems: 12
+                    items: { $ref: '#/components/schemas/ScreeningBoardItem' }
+                  server_time: { type: string, format: date-time }
+
+  /public/reservations:
+    post:
+      tags: [public]
+      operationId: publicCreateReservation
+      summary: 上映の事前予約（来場者）
+      description: |
+        `Idempotency-Key` 必須。来場者識別を使う。IP あたり `reservations_per_minute` 回/分。
+        * 人数は 1〜`max_party_size`（範囲外 `400`）。
+        * 同一識別の将来の有効予約が `max_future_reservations` 件以上 `422 too_many_reservations`。
+        * ブロック中 `403 forbidden`、部門が paused/closed `422 not_open`、中止 `422 screening_cancelled`、
+          受付外 `422 booking_closed`、満席 `422 full`、残席不足 `422 not_enough_seats`。
+        応答の `access_token`/`url` は予約確認用（再表示不可、紛失時はスタッフが再発行）。
+      security: []
+      x-roles: public
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/XRequestedWith'
+        - $ref: '#/components/parameters/XClientId'
+        - $ref: '#/components/parameters/XClientKind'
+        - $ref: '#/components/parameters/ClientCookie'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [screening_id, name, party_size]
+              properties:
+                screening_id: { type: string, format: uuid }
+                name: { type: string, minLength: 1, maxLength: 30 }
+                party_size: { type: integer, minimum: 1 }
+      responses:
+        '201':
+          description: 予約成立
+          headers:
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReservationCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /public/reservations/by-token/{token}:
+    get:
+      tags: [public]
+      operationId: publicGetReservation
+      summary: 予約確認（来場者・トークン）
+      description: |
+        チケットごとの入場用 QR トークン `entry_token`、発券済みクーポンの `token` を含む。
+        IP あたり 120 回/分（バースト 60）。
+      security: []
+      x-roles: public
+      parameters:
+        - $ref: '#/components/parameters/TokenPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Reservation'
+                  - type: object
+                    required: [wallet_enabled]
+                    properties:
+                      wallet_enabled:
+                        type: boolean
+                        description: Apple Wallet パス発行が設定済みか
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /public/reservations/by-token/{token}/cancel:
+    post:
+      tags: [public]
+      operationId: publicCancelReservation
+      summary: 予約の本人取消
+      description: |
+        上映開始の `visitor_cancel_before_min` 分前まで（過ぎると `422 cancel_deadline`）。
+        既に取消済み `409 already_cancelled`、入場済みチケットあり `409 already_admitted`。
+      security: []
+      x-roles: public
+      parameters:
+        - $ref: '#/components/parameters/TokenPath'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: 取消後の予約（トークン付き）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /public/reservations/by-token/{token}/tickets/{seq}/wallet:
+    get:
+      tags: [public]
+      operationId: publicWalletPass
+      summary: Apple Wallet パス（.pkpass）
+      description: |
+        1 枚の入場チケットの署名付き `.pkpass`。Wallet 未設定 `503 wallet_disabled`（トークン検証より先に判定）。
+        チケットまたは予約が取消済み `409 ticket_void`。IP あたり 30 回/分（バースト 10）。
+      security: []
+      x-roles: public
+      parameters:
+        - $ref: '#/components/parameters/TokenPath'
+        - name: seq
+          in: path
+          required: true
+          description: 予約内のチケット通番（1 から）
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: pkpass（ZIP）
+          headers:
+            Content-Disposition:
+              description: '`attachment; filename="ticket-<ticket_no>.pkpass"`'
+              schema: { type: string }
+          content:
+            application/vnd.apple.pkpass:
+              schema:
+                type: string
+                format: binary
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503':
+          description: Wallet 発行が設定されていない
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /public/coupons/by-token/{token}:
+    get:
+      tags: [public]
+      operationId: publicGetCoupon
+      summary: クーポン表示（来場者・トークン）
+      description: IP あたり 60 回/分（バースト 30）。
+      security: []
+      x-roles: public
+      parameters:
+        - $ref: '#/components/parameters/TokenPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicCoupon' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ------------------------------------------------------------------
+  # 表示端末
+  # ------------------------------------------------------------------
+  /display/departments/{id}/site-code:
+    get:
+      tags: [display]
+      operationId: displaySiteCode
+      summary: 現地確認コードの取得（表示端末）
+      description: |
+        必要権限: display / admin。display 権限の端末が呼ぶと生存記録（heartbeat, screen=`sitecode`）も更新する。
+        現地コードが無効な部門では `enabled: false` のみ。
+      x-roles: [display, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SiteCode' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /display/heartbeat:
+    post:
+      tags: [display]
+      operationId: displayHeartbeat
+      summary: 表示端末の生存通知
+      description: '必要権限: display / admin'
+      x-roles: [display, admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                screen: { type: string, description: 表示中の画面名（自由記述） }
+                department_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [server_time]
+                properties:
+                  server_time: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ------------------------------------------------------------------
+  # スタッフ：注文・会計・キッチン
+  # ------------------------------------------------------------------
+  /staff/departments:
+    get:
+      tags: [staff-orders]
+      operationId: staffListDepartments
+      summary: 部門一覧（スタッフ）
+      description: '必要権限: ログインのみ。内容は公開版と同じ。'
+      x-roles: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Department' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /staff/departments/{id}/products:
+    get:
+      tags: [staff-orders]
+      operationId: staffCatalog
+      summary: 部門の商品カタログ（非公開・無効を含む）
+      description: '必要権限: ログインのみ'
+      x-roles: []
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CatalogResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /staff/variants/{id}:
+    patch:
+      tags: [staff-orders]
+      operationId: updateVariant
+      summary: バリエーションの販売状態・価格等の変更
+      description: |
+        必要権限: cashier / treasurer / admin。
+        `sale_status`（売り切れ切替）は上記全員可。`price`, `visibility`, `active`, `sort_order` を含む場合は admin のみ（他は `403`）。
+      x-roles: [cashier, treasurer, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                price: { type: integer, minimum: 0, description: admin のみ }
+                sale_status: { $ref: '#/components/schemas/SaleStatus' }
+                visibility: { $ref: '#/components/schemas/Visibility' }
+                active: { type: boolean, description: admin のみ }
+                sort_order: { type: integer, description: admin のみ }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /staff/orders:
+    post:
+      tags: [staff-orders]
+      operationId: staffCreateOrder
+      summary: 店頭注文の作成
+      description: |
+        必要権限: cashier / treasurer / admin。`Idempotency-Key` 必須。
+        部門が営業中でない `422 not_open`。非公開商品も注文可、数量上限なし（1 明細 1〜99）。
+      x-roles: [cashier, treasurer, admin]
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [department_id, items]
+              properties:
+                department_id: { type: string, format: uuid }
+                items:
+                  type: array
+                  minItems: 1
+                  items: { $ref: '#/components/schemas/ItemRequest' }
+      responses:
+        '201':
+          description: 作成された注文（スタッフ向け詳細）
+          headers:
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffOrder' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    get:
+      tags: [staff-orders]
+      operationId: staffListOrders
+      summary: 注文一覧（部門・営業日）
+      description: |
+        必要権限: cashier / kitchen / treasurer / admin。最大 500 件、呼出番号の降順。
+      x-roles: [cashier, kitchen, treasurer, admin]
+      parameters:
+        - name: department_id
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+        - name: day
+          in: query
+          description: 営業日（省略時は今日）
+          schema: { type: string, format: date }
+        - name: filter
+          in: query
+          description: |
+            `active`=受付中（既定）, `unpaid`=受付中かつ未払い,
+            `ready`=受付中・未受渡で調理待ち／調理中の明細が無いもの（受渡可能）, `all`=すべて
+          schema:
+            type: string
+            enum: [active, unpaid, ready, all]
+            default: active
+        - name: call_number
+          in: query
+          description: 呼出番号で絞り込み（0 または省略で全件）
+          schema: { type: integer }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/OrderSummary' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /staff/orders/{id}:
+    get:
+      tags: [staff-orders]
+      operationId: staffGetOrder
+      summary: 注文詳細（スタッフ）
+      description: '必要権限: cashier / kitchen / treasurer / admin'
+      x-roles: [cashier, kitchen, treasurer, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffOrder' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /staff/orders/{id}/cancel:
+    post:
+      tags: [staff-orders]
+      operationId: staffCancelOrder
+      summary: 注文の取消
+      description: |
+        必要権限: cashier / treasurer / admin。支払済み注文の取消は treasurer / admin のみ（返金は別操作）。
+        受付中でない `409 not_cancellable`。
+      x-roles: [cashier, treasurer, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonRequired' }
+      responses:
+        '200':
+          description: 取消後の注文
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffOrder' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /staff/orders/{id}/items/{item}/cancel:
+    post:
+      tags: [staff-orders]
+      operationId: staffCancelOrderItem
+      summary: 未払い注文の明細取消
+      description: |
+        必要権限: cashier / treasurer / admin。受付中・未払いの注文のみ（それ以外 `409 not_editable`）。
+        明細を請求から除外し小計・合計を減らす。全明細が取消になると注文自体も取消。既に取消 `409 already_cancelled`。
+      x-roles: [cashier, treasurer, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+        - name: item
+          in: path
+          required: true
+          description: 注文明細 ID
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonRequired' }
+      responses:
+        '200':
+          description: 更新後の注文
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffOrder' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /staff/orders/{id}/quote:
+    post:
+      tags: [staff-orders]
+      operationId: staffPaymentQuote
+      summary: 会計前の割引見積（クーポンは消費しない）
+      description: |
+        必要権限: cashier / treasurer / admin。クーポンエラーは 404 / 422（`coupon_used`, `coupon_revoked`,
+        `coupon_not_yet`, `coupon_expired`, `coupon_persons`, `coupon_not_combinable`, `coupon_not_applicable`, `coupon_no_target`）。
+      x-roles: [cashier, treasurer, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                coupons:
+                  type: array
+                  items: { $ref: '#/components/schemas/CouponUse' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentQuote' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /staff/orders/{id}/payment:
+    post:
+      tags: [staff-orders]
+      operationId: staffPayment
+      summary: 会計（入金確定）
+      description: |
+        必要権限: cashier / treasurer / admin。`Idempotency-Key` 必須。
+        クーポン消費・入金・現金明細を同一トランザクションで確定する。
+        * 取消済み `409 cancelled`、会計済み `409 already_paid`、`expected_total` と不一致 `409 total_changed`、
+          クーポン状態変化 `409 coupon_changed`。
+        * 預かり不足 `422 insufficient`、金券へのお釣り（設定 `voucher_change_allowed` が false）`422 voucher_change`。
+        * 保管先 `cash_account_id` 省略時は自分の財布（無ければ `422 no_wallet`）。他人の財布 `403`、
+          金庫への直接入金は treasurer / admin のみ。
+      x-roles: [cashier, treasurer, admin]
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                cash_received: { type: integer, minimum: 0, default: 0 }
+                voucher_received: { type: integer, minimum: 0, default: 0, description: 金券での受領額 }
+                coupons:
+                  type: array
+                  items: { $ref: '#/components/schemas/CouponUse' }
+                expected_total:
+                  type: integer
+                  description: 画面に表示した請求額。指定時はサーバー計算と一致しなければ 409。
+                cash_account_id:
+                  type: string
+                  format: uuid
+                  description: 入金先の保管先（省略時は自分の財布）
+      responses:
+        '200':
+          description: 会計後の注文
+          headers:
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffOrder' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /staff/orders/{id}/refund:
+    post:
+      tags: [staff-orders]
+      operationId: staffRefund
+      summary: 返金
+      description: |
+        必要権限: treasurer / admin。`Idempotency-Key` 必須。現金（medium=cash）で返金明細を記録する。
+        未払い `409 unpaid`、累計が入金額を超える `422 refund_exceeds`。
+        `cancel_order: true` かつ受付中なら注文も取消。`restore_coupons: true` なら適用済みクーポン利用をすべて取消して残人数を戻す。
+        `restore_coupons` はこの返金で全額返金（payment_status=refunded）になる場合のみ可（それ以外 `422 partial_refund_restore`）。
+      x-roles: [treasurer, admin]
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [amount, reason]
+              properties:
+                amount: { type: integer, minimum: 1 }
+                reason: { type: string, minLength: 1, maxLength: 200 }
+                cash_account_id: { type: string, format: uuid, description: 出金元（省略時は自分の財布） }
+                cancel_order: { type: boolean, default: false }
+                restore_coupons: { type: boolean, default: false, description: 全額返金時のみ指定可 }
+      responses:
+        '200':
+          description: 返金後の注文
+          headers:
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffOrder' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /staff/orders/{id}/handoff:
+    post:
+      tags: [staff-orders]
+      operationId: staffHandoff
+      summary: 受け渡し（注文完了）
+      description: |
+        必要権限: cashier / treasurer / admin。
+        受付中・未受渡でない `409 not_handable`、調理未完了 `409 not_ready`。
+        未払いの受け渡しは treasurer / admin のみ（他は `409 unpaid`）で、`unpaid_reason` 必須。
+      x-roles: [cashier, treasurer, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                unpaid_reason: { type: string, maxLength: 200 }
+      responses:
+        '200':
+          description: 受渡後の注文
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffOrder' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /staff/orders/{id}/handoff/revert:
+    post:
+      tags: [staff-orders]
+      operationId: staffHandoffRevert
+      summary: 受け渡しの訂正（未受渡に戻す）
+      description: '必要権限: cashier / treasurer / admin。受渡済みでない `409 not_handed`。'
+      x-roles: [cashier, treasurer, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonRequired' }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /staff/kitchen:
+    get:
+      tags: [staff-orders]
+      operationId: staffKitchen
+      summary: キッチン表示（今日・未受渡・調理が必要な注文）
+      description: |
+        必要権限: kitchen / cashier / admin。受付中の注文と、10 分以内に取消された注文を含む。
+        明細は調理が必要なもののみ。作成順。
+      x-roles: [kitchen, cashier, admin]
+      parameters:
+        - name: department_id
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orders, server_time]
+                properties:
+                  orders:
+                    type: array
+                    items: { $ref: '#/components/schemas/KitchenOrder' }
+                  server_time: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /staff/order-items/{id}/cook:
+    post:
+      tags: [staff-orders]
+      operationId: staffCookItem
+      summary: 明細の調理状態変更
+      description: |
+        必要権限: kitchen / cashier / admin。
+        許可される遷移: waiting→cooking|cooked, cooking→cooked|waiting, cooked→cooking（それ以外 `400`）。
+        調理不要の明細は `400`。`from` が現状と異なる（他端末で変更済み）`409 state_changed`。
+        注文が取消済み・受渡済み `409 order_closed`。
+      x-roles: [kitchen, cashier, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [from, to]
+              properties:
+                from: { type: string, enum: [waiting, cooking, cooked] }
+                to: { type: string, enum: [waiting, cooking, cooked] }
+                reason: { type: string, description: 訂正理由（任意） }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, cook_status]
+                properties:
+                  ok: { type: boolean, const: true }
+                  cook_status: { type: string, enum: [waiting, cooking, cooked] }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /staff/coupons/verify/{token}:
+    get:
+      tags: [staff-orders]
+      operationId: staffVerifyCoupon
+      summary: クーポン QR の読み取り（消費しない）
+      description: |
+        必要権限: cashier / treasurer / admin。使用不可でも 200（`usable: false` と `reason`）。
+        IP あたり 120 回/分（バースト 60）。
+      x-roles: [cashier, treasurer, admin]
+      parameters:
+        - $ref: '#/components/parameters/TokenPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CouponVerifyResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /staff/redemptions/{id}/reverse:
+    post:
+      tags: [staff-orders]
+      operationId: staffReverseRedemption
+      summary: クーポン利用の取消（残人数を復元）
+      description: |
+        必要権限: treasurer / admin。適用中（applied）でない `409 not_applied`。
+        二重割引を防ぐため、注文が全額返金済み（refunded）か、未払いのまま取消済みの場合のみ可
+        （それ以外 `422 order_still_paid`）。注文の割引額・合計は変更しない。
+      x-roles: [treasurer, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonRequired' }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  # ------------------------------------------------------------------
+  # スタッフ：プラネタリウム
+  # ------------------------------------------------------------------
+  /staff/screenings:
+    get:
+      tags: [staff-planetarium]
+      operationId: staffListScreenings
+      summary: 上映一覧（スタッフ・内訳付き）
+      description: '必要権限: ログインのみ。`day` 省略時は今日、`all=1` なら全日程。'
+      x-roles: []
+      parameters:
+        - $ref: '#/components/parameters/DayQuery'
+        - name: all
+          in: query
+          description: '`1` で日付を絞らない（`day` 未指定時のみ有効）'
+          schema: { type: string, enum: ['1'] }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [screenings, server_time]
+                properties:
+                  screenings:
+                    type: array
+                    items: { $ref: '#/components/schemas/Screening' }
+                  server_time: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /staff/walkins:
+    post:
+      tags: [staff-planetarium]
+      operationId: staffWalkin
+      summary: 当日受付
+      description: |
+        必要権限: reception / admin。`Idempotency-Key` 必須。人数 1〜50。
+        `admit_now: true` なら全チケットを同時に入場済みにする。
+        中止 `422 screening_cancelled`、終了 `422 finished`、残席不足 `422 not_enough_seats`。
+      x-roles: [reception, admin]
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [screening_id, party_size]
+              properties:
+                screening_id: { type: string, format: uuid }
+                party_size: { type: integer, minimum: 1, maximum: 50 }
+                name: { type: string }
+                admit_now: { type: boolean, default: false }
+      responses:
+        '201':
+          description: 作成された予約（トークン・URL付き）
+          headers:
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Reservation'
+                  - type: object
+                    required: [access_token, url]
+                    properties:
+                      access_token: { type: string }
+                      url: { type: string, format: uri }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /staff/reservations:
+    get:
+      tags: [staff-planetarium]
+      operationId: staffListReservations
+      summary: 予約検索
+      description: |
+        必要権限: reception / admin。`screening_id` か `q` のどちらかが必須。
+        `q` は予約番号・氏名の部分一致、またはチケット番号の完全一致。最大 300 件、作成順。
+      x-roles: [reception, admin]
+      parameters:
+        - name: screening_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: q
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ReservationListItem' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /staff/reservations/{id}:
+    get:
+      tags: [staff-planetarium]
+      operationId: staffGetReservation
+      summary: 予約詳細（スタッフ・トークンなし）
+      description: '必要権限: reception / admin'
+      x-roles: [reception, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /staff/reservations/{id}/cancel:
+    post:
+      tags: [staff-planetarium]
+      operationId: staffCancelReservation
+      summary: 予約の取消（スタッフ）
+      description: '必要権限: reception / admin。取消済み `409 already_cancelled`、入場済みあり `409 already_admitted`。'
+      x-roles: [reception, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonRequired' }
+      responses:
+        '200':
+          description: 取消後の予約（トークンなし）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /staff/reservations/{id}/reissue-link:
+    post:
+      tags: [staff-planetarium]
+      operationId: staffReissueReservationLink
+      summary: 予約確認 URL の再発行
+      description: |
+        必要権限: reception / admin。旧 `access_token` は無効になる。
+        あわせて、この予約の全チケットの入場 QR（`entry_token`）と、予約に紐づく発券済みクーポンのトークンも作り直す
+        （旧 QR・旧クーポン URL・発行済み Wallet パスの QR は使えなくなる）。新しい値は新 URL の予約確認で取得する。
+      x-roles: [reception, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonRequired' }
+      responses:
+        '200':
+          description: 新しいトークン
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, url]
+                properties:
+                  access_token: { type: string }
+                  url: { type: string, format: uri }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /staff/checkin/verify:
+    post:
+      tags: [staff-planetarium]
+      operationId: staffCheckinVerify
+      summary: 入場チケットの読み取り（確定しない）
+      description: |
+        必要権限: reception / admin。IP あたり 240 回/分（バースト 60）。
+        チケットが見つからなくても 200（`result: not_found`）。確定前の判定は `result: ok`。
+      x-roles: [reception, admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckinRequest' }
+      responses:
+        '200':
+          description: 判定結果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckinResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /staff/checkin:
+    post:
+      tags: [staff-planetarium]
+      operationId: staffCheckin
+      summary: 入場確定
+      description: |
+        必要権限: reception / admin。`Idempotency-Key` 必須。
+        判定結果はすべて 200 で返す（成功時 `result: admitted`）。拒否時は拒否記録を残す。
+      x-roles: [reception, admin]
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckinRequest' }
+      responses:
+        '200':
+          description: 判定結果
+          headers:
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckinResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /staff/tickets/{id}/revert:
+    post:
+      tags: [staff-planetarium]
+      operationId: staffCheckinRevert
+      summary: 入場の取消（訂正）
+      description: '必要権限: admin。入場済みでない `409 not_admitted`。'
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonRequired' }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ------------------------------------------------------------------
+  # スタッフ：現金
+  # ------------------------------------------------------------------
+  /staff/cash/accounts:
+    get:
+      tags: [staff-cash]
+      operationId: staffCashAccounts
+      summary: 保管先と理論残高
+      description: |
+        必要権限: cashier / treasurer / admin。
+        cashier は自分の財布と共用レジのみ。treasurer / admin は全件と全体合計（`total`）を見られる。
+      x-roles: [cashier, treasurer, admin]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CashAccountsResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /staff/cash/accounts/{id}/entries:
+    get:
+      tags: [staff-cash]
+      operationId: staffCashEntries
+      summary: 保管先の入出金明細（最新 500 件）
+      description: '必要権限: cashier / treasurer / admin。cashier は自分の財布と共用レジのみ（他は `403`）。'
+      x-roles: [cashier, treasurer, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CashEntry' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /staff/cash/transfers:
+    post:
+      tags: [staff-cash]
+      operationId: staffRequestTransfer
+      summary: 現金の引継ぎ・回収の申請
+      description: |
+        必要権限: cashier / treasurer / admin。`Idempotency-Key` 必須。
+        cashier は自分の財布または共用レジからのみ申請可。移動先が金庫なら `kind` は `collection` に置き換わる。
+        理論残高 −申請中額 を超える `422 insufficient_balance`。受取側（または treasurer 全員）に通知する。
+      x-roles: [cashier, treasurer, admin]
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [from_account_id, to_account_id, amount]
+              properties:
+                from_account_id: { type: string, format: uuid }
+                to_account_id: { type: string, format: uuid }
+                amount: { type: integer, minimum: 1 }
+                medium: { $ref: '#/components/schemas/CashMedium' }
+                kind:
+                  type: string
+                  enum: [handover, collection]
+                  default: handover
+                reason: { type: string }
+      responses:
+        '201':
+          description: 申請作成
+          headers:
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    get:
+      tags: [staff-cash]
+      operationId: staffListTransfers
+      summary: 現金移動の一覧（最新 300 件）
+      description: |
+        必要権限: cashier / treasurer / admin。cashier は自分が関係する（移動元・移動先の財布の持ち主、申請者）もののみ。
+      x-roles: [cashier, treasurer, admin]
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/TransferStatus' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CashTransfer' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /staff/cash/destinations:
+    get:
+      tags: [staff-cash]
+      operationId: staffCashDestinations
+      summary: 現金移動の移動先候補
+      description: |
+        必要権限: cashier / treasurer / admin。有効な保管先すべて（持ち主が無効な部員の財布は除く）。
+        残高は含まない。並び順は金庫 → 共用レジ → 個人財布、同種内は名前順。
+      x-roles: [cashier, treasurer, admin]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CashDestination' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /staff/cash/transfers/{id}/decide:
+    post:
+      tags: [staff-cash]
+      operationId: staffDecideTransfer
+      summary: 現金移動の確認・差し戻し・取り下げ
+      description: |
+        必要権限: cashier / treasurer / admin。
+        * `confirm`: 受取側（財布の持ち主、金庫・レジは treasurer / admin）のみ。自分で申請した金庫・レジ宛ての回収は admin 以外確認不可。
+          移動元残高不足 `422 insufficient_balance`。
+        * `reject`: 受取側のみ。`reason` 必須。
+        * `cancel`: 申請者または admin。
+        処理済み `409 decided`。
+      x-roles: [cashier, treasurer, admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action]
+              properties:
+                action: { type: string, enum: [confirm, reject, cancel] }
+                reason: { type: string, maxLength: 200 }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  # ------------------------------------------------------------------
+  # 会計責任者
+  # ------------------------------------------------------------------
+  /treasurer/cash/opening:
+    post:
+      tags: [treasurer]
+      operationId: treasurerOpeningCash
+      summary: 開始釣銭の登録
+      description: '必要権限: treasurer / admin。`Idempotency-Key` 必須。'
+      x-roles: [treasurer, admin]
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [cash_account_id, amount]
+              properties:
+                cash_account_id: { type: string, format: uuid }
+                amount: { type: integer, minimum: 1 }
+                medium: { $ref: '#/components/schemas/CashMedium' }
+                reason: { type: string, default: 開始釣銭 }
+      responses:
+        '201':
+          description: 登録
+          headers:
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /treasurer/cash/reconciliations:
+    post:
+      tags: [treasurer]
+      operationId: treasurerReconcile
+      summary: 締め精算
+      description: |
+        必要権限: treasurer / admin。`Idempotency-Key` 必須。
+        実残高と理論残高の差額を調整明細として記録する。差額があるのに `note` が空なら `400`。
+        未確定の移動がある `422 pending_transfers`。`counted_by` 省略時は自分。
+      x-roles: [treasurer, admin]
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [cash_account_id, actual_balance]
+              properties:
+                cash_account_id: { type: string, format: uuid }
+                medium: { $ref: '#/components/schemas/CashMedium' }
+                actual_balance: { type: integer, minimum: 0 }
+                counted_by: { type: string, format: uuid, description: 数えた部員の ID }
+                note: { type: string }
+      responses:
+        '201':
+          description: 精算結果
+          headers:
+            Idempotent-Replay:
+              $ref: '#/components/headers/IdempotentReplay'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, theoretical_balance, actual_balance, difference]
+                properties:
+                  id: { type: string, format: uuid }
+                  theoretical_balance: { type: integer }
+                  actual_balance: { type: integer }
+                  difference: { type: integer, description: actual − theoretical }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    get:
+      tags: [treasurer]
+      operationId: treasurerListReconciliations
+      summary: 精算履歴（最新 300 件）
+      description: '必要権限: treasurer / admin'
+      x-roles: [treasurer, admin]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Reconciliation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /treasurer/sales:
+    get:
+      tags: [treasurer]
+      operationId: treasurerSales
+      summary: 売上集計（JSON または CSV）
+      description: |
+        必要権限: treasurer / admin。
+        注文数・数量・値引前金額・値引額・入金・返金・純売上（入金−返金）・未払いを集計。釣銭や現金移動は含まない。
+        取消かつ未払いの注文、支払前に取消された明細は除外。
+        返金は注文単位で 1 回だけ、その注文の最初の明細が属する行に計上する（商品別なら最初の商品）。
+        合計行の `orders` は行と同じ条件で数えた注文の重複なし件数。
+        `format=csv` のとき UTF-8（BOM 付き）CSV を `Content-Disposition: attachment; filename="sales_<group>.csv"` で返す。
+        CSV 列: `<集計単位>,注文数,数量,値引前金額,値引額,入金,返金,純売上,未払い`、最終行は「合計」。
+      x-roles: [treasurer, admin]
+      parameters:
+        - name: from
+          in: query
+          description: 営業日の開始（含む）
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          description: 営業日の終了（含む）
+          schema: { type: string, format: date }
+        - name: group
+          in: query
+          description: 集計単位（day=営業日, department=部門, product=商品（選択肢込み）, hour=時間帯 JST, cashier=入金担当者）
+          schema:
+            type: string
+            enum: [day, department, product, hour, cashier]
+            default: day
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SalesReport' }
+            text/csv:
+              schema:
+                type: string
+              example: "﻿部門,注文数,数量,値引前金額,値引額,入金,返金,純売上,未払い\nやきうどん,2,4,1600,0,800,0,800,800\n合計,2,4,1600,0,800,0,800,800\n"
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ------------------------------------------------------------------
+  # シフト・通知
+  # ------------------------------------------------------------------
+  /staff/shifts:
+    get:
+      tags: [shifts]
+      operationId: staffShifts
+      summary: シフト枠・自分の希望・確定配置・警告
+      description: |
+        必要権限: ログインのみ。admin は無効な枠と全員の希望（`requests`）も見られる（admin 以外は `requests: null`）。
+        `warnings` は人数不足と重複配置の警告文。
+      x-roles: []
+      parameters:
+        - $ref: '#/components/parameters/DayQuery'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [slots, warnings]
+                properties:
+                  slots:
+                    type: array
+                    items: { $ref: '#/components/schemas/ShiftSlot' }
+                  warnings:
+                    type: array
+                    items: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /staff/shift-slots/{id}/request:
+    put:
+      tags: [shifts]
+      operationId: staffShiftRequest
+      summary: シフト希望の提出・更新
+      description: '必要権限: ログインのみ'
+      x-roles: []
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [preference]
+              properties:
+                preference: { $ref: '#/components/schemas/ShiftPreference' }
+                note: { type: string, maxLength: 200 }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /staff/shift-exchanges:
+    get:
+      tags: [shifts]
+      operationId: staffListExchanges
+      summary: シフト交代申請の一覧（最新 200 件）
+      description: '必要権限: ログインのみ。admin は全件、それ以外は自分が申請者・相手のもの。'
+      x-roles: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ShiftExchange' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [shifts]
+      operationId: staffRequestExchange
+      summary: シフト交代の申請
+      description: |
+        必要権限: ログインのみ。自分の有効な配置のみ（他人 `403`）。相手が既に同じ枠に配置 `422 already_assigned`。
+        同じ配置に未完了の申請がある `409 duplicate`。
+      x-roles: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [assignment_id, to_member_id]
+              properties:
+                assignment_id: { type: string, format: uuid }
+                to_member_id: { type: string, format: uuid }
+                reason: { type: string }
+      responses:
+        '201':
+          description: 申請作成
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /staff/shift-exchanges/{id}/respond:
+    post:
+      tags: [shifts]
+      operationId: staffRespondExchange
+      summary: 交代依頼への回答・取り下げ
+      description: |
+        必要権限: ログインのみ。
+        `accept`/`decline` は依頼された本人のみ（状態 requested のとき）。`cancel` は申請者のみ（requested/accepted のとき）。
+        それ以外の `action`（`approve`/`reject` を含む）は `400`。状態不一致 `409 state_changed`。
+      x-roles: []
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExchangeResponseAction' }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /staff/members/directory:
+    get:
+      tags: [shifts]
+      operationId: staffMemberDirectory
+      summary: 有効な部員の名簿（ID と名前のみ）
+      description: '必要権限: ログインのみ'
+      x-roles: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, name]
+                  properties:
+                    id: { type: string, format: uuid }
+                    name: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /staff/notifications:
+    get:
+      tags: [shifts]
+      operationId: staffListNotifications
+      summary: 自分宛ての通知（最新 100 件）
+      description: '必要権限: ログインのみ'
+      x-roles: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Notification' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /staff/notifications/read:
+    post:
+      tags: [shifts]
+      operationId: staffReadNotifications
+      summary: 通知を既読にする
+      description: '必要権限: ログインのみ。`all: true` なら全件、そうでなければ `ids` の通知（UUID でない ID は無視）。'
+      x-roles: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                all: { type: boolean, default: false }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ------------------------------------------------------------------
+  # 管理
+  # ------------------------------------------------------------------
+  /admin/settings/limits:
+    get:
+      tags: [admin]
+      operationId: adminGetLimits
+      summary: 上限・閾値の設定取得
+      description: '必要権限: admin'
+      x-roles: [admin]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Limits' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin]
+      operationId: adminPutLimits
+      summary: 上限・閾値の設定更新
+      description: |
+        必要権限: admin。現在値に本文をマージして保存する（省略したキーは現状維持）。
+        `seat_threshold_percent` は 1〜100、`visitor_cancel_before_min`・`unpaid_warn_minutes`・`cooking_warn_minutes` 以外は 1 以上。
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Limits' }
+      responses:
+        '200':
+          description: 保存後の設定
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Limits' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/settings/voucher-change:
+    get:
+      tags: [admin]
+      operationId: adminGetVoucherChange
+      summary: 金券へのお釣りを許可するかの取得
+      description: '必要権限: admin。未設定なら false。'
+      x-roles: [admin]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [allowed]
+                properties:
+                  allowed: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin]
+      operationId: adminPutVoucherChange
+      summary: 金券へのお釣りを許可するか
+      description: '必要権限: admin'
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                allowed: { type: boolean, default: false }
+      responses:
+        '200':
+          description: 保存した値
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [allowed]
+                properties:
+                  allowed: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/business-days:
+    put:
+      tags: [admin]
+      operationId: adminPutBusinessDays
+      summary: 営業日の登録・更新（upsert、削除はしない）
+      description: '必要権限: admin。開催（festival_event）が無ければ作成する（名前の既定は「学園祭」）。'
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                event_name: { type: string }
+                days:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [day]
+                    properties:
+                      day: { type: string, format: date }
+                      label: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/departments:
+    post:
+      tags: [admin]
+      operationId: adminCreateDepartment
+      summary: 部門の作成
+      description: '必要権限: admin。コード重複 `409 duplicate`、`kind` 不正 `400`。'
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [code, name, kind]
+              properties:
+                code: { type: string, minLength: 1, maxLength: 30 }
+                name: { type: string, minLength: 1, maxLength: 50 }
+                kind: { $ref: '#/components/schemas/DepartmentKind' }
+                sort_order: { type: integer, default: 0 }
+      responses:
+        '201':
+          description: 作成
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/departments/{id}:
+    patch:
+      tags: [admin]
+      operationId: adminUpdateDepartment
+      summary: 部門の更新（営業状態・モバイル受付・現地コード等）
+      description: |
+        必要権限: admin。指定したフィールドのみ更新。`rotate_site_code: true` で現地コードを即時更新。
+        `site_code_interval_sec` は 30〜86400、`site_code_grace_sec` は 0 以上（違反 `400 invalid_value`）。
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string }
+                business_status: { $ref: '#/components/schemas/BusinessStatus' }
+                mobile_order_enabled: { type: boolean }
+                site_code_enabled: { type: boolean }
+                site_code_interval_sec: { type: integer, minimum: 30, maximum: 86400 }
+                site_code_grace_sec: { type: integer, minimum: 0 }
+                rotate_site_code: { type: boolean, default: false }
+                notice: { type: string, maxLength: 200 }
+                sort_order: { type: integer }
+      responses:
+        '200':
+          description: 更新後の部門
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Department' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/displays:
+    get:
+      tags: [admin]
+      operationId: adminDisplayStatus
+      summary: 表示端末の最終接続
+      description: '必要権限: admin。`stale` は `display_stale_seconds` 以上更新が無い。'
+      x-roles: [admin]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DisplayStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/products:
+    post:
+      tags: [admin]
+      operationId: adminCreateProduct
+      summary: 商品の作成
+      description: |
+        必要権限: admin。選択肢の全組み合わせのバリエーションを `default_price` で作成する。
+        選択肢の種類が無ければバリエーション 1 つ。
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [department_id, name]
+              properties:
+                department_id: { type: string, format: uuid }
+                name: { type: string, minLength: 1, maxLength: 50 }
+                description: { type: string }
+                needs_cooking: { type: boolean, default: false }
+                visibility: { $ref: '#/components/schemas/Visibility' }
+                sort_order: { type: integer, default: 0 }
+                option_groups:
+                  type: array
+                  items: { $ref: '#/components/schemas/OptionGroupInput' }
+                default_price: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '201':
+          description: 作成
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/products/{id}:
+    patch:
+      tags: [admin]
+      operationId: adminUpdateProduct
+      summary: 商品の更新
+      description: '必要権限: admin'
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 1, maxLength: 50 }
+                description: { type: string }
+                needs_cooking: { type: boolean }
+                visibility: { $ref: '#/components/schemas/Visibility' }
+                active: { type: boolean }
+                sort_order: { type: integer }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/products/{id}/option-groups:
+    post:
+      tags: [admin]
+      operationId: adminAddOptionGroup
+      summary: 選択肢の種類（軸）の追加
+      description: |
+        必要権限: admin。`values` は 1 つ以上、`default_price` は 0 以上（違反 `400`）。
+        既存の有効なバリエーションはすべて無効化し、有効な選択肢の全組み合わせを作り直す。
+        新しい組み合わせの価格・販売状態・公開設定は、それを含む旧組み合わせ（例：しょうゆ/中 → しょうゆ/中/辛口）から引き継ぎ、
+        該当が無いものだけ `default_price`（販売中・公開）になる。
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, values]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 30 }
+                values:
+                  type: array
+                  minItems: 1
+                  items: { type: string, minLength: 1, maxLength: 30 }
+                default_price: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '201':
+          description: 作成した選択肢の種類の ID
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/option-groups/{id}/values:
+    post:
+      tags: [admin]
+      operationId: adminAddOptionValue
+      summary: 選択肢の追加
+      description: '必要権限: admin。未作成の組み合わせのバリエーションを `default_price` で追加する。'
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 30 }
+                default_price: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '201':
+          description: 作成した選択肢の ID
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/option-groups/{id}:
+    patch:
+      tags: [admin]
+      operationId: adminUpdateOptionGroup
+      summary: 選択肢の種類の更新
+      description: '必要権限: admin'
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OptionUpdate' }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/option-values/{id}:
+    patch:
+      tags: [admin]
+      operationId: adminUpdateOptionValue
+      summary: 選択肢の更新
+      description: '必要権限: admin'
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OptionUpdate' }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/members:
+    get:
+      tags: [admin]
+      operationId: adminListMembers
+      summary: 部員一覧
+      description: '必要権限: admin'
+      x-roles: [admin]
+      responses:
+        '200':
+          description: OK（名前順）
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Member' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [admin]
+      operationId: adminCreateMember
+      summary: 部員の作成
+      description: |
+        必要権限: admin。`create_wallet`（既定 true）で個人財布の保管先も作る。login_id 重複 `409 duplicate`。
+        `active` は作成時は無視される。
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/MemberInput'
+              required: [name, login_id, password]
+      responses:
+        '201':
+          description: 作成
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/members/{id}:
+    patch:
+      tags: [admin]
+      operationId: adminUpdateMember
+      summary: 部員の更新
+      description: |
+        必要権限: admin。`roles` 指定時は全置換。自分の admin 権限は外せない・自分を無効化できない（`400`）。
+        パスワード変更・無効化すると対象のセッションをすべて削除。`login_id` と `create_wallet` は無視される。
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemberInput' }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/cash/accounts:
+    post:
+      tags: [admin]
+      operationId: adminCreateCashAccount
+      summary: 保管先の作成
+      description: '必要権限: admin。`wallet` は `member_id` 必須。有効な財布は部員 1 人 1 つ（重複 `409 duplicate`）。'
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, kind]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 50 }
+                kind: { $ref: '#/components/schemas/CashAccountKind' }
+                member_id: { type: string, format: uuid }
+      responses:
+        '201':
+          description: 作成
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/cash/accounts/{id}:
+    patch:
+      tags: [admin]
+      operationId: adminUpdateCashAccount
+      summary: 保管先の更新・無効化
+      description: '必要権限: admin。現金・金券いずれかの残高が 0 でないと無効化できない `422 balance_remaining`。存在しない ID は `404`。'
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string }
+                active: { type: boolean }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /admin/screening-rules/preview:
+    post:
+      tags: [admin]
+      operationId: adminRulePreview
+      summary: 上映枠自動生成のプレビュー（DB は変更しない）
+      description: '必要権限: admin。既存枠と重複する枠は `conflict` に理由が入り、作成対象外。'
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScreeningRuleInput' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [slots, will_create, rule]
+                properties:
+                  slots:
+                    type: array
+                    items: { $ref: '#/components/schemas/PlannedSlot' }
+                  will_create: { type: integer }
+                  rule: { $ref: '#/components/schemas/ScreeningRuleInput' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/screening-rules:
+    post:
+      tags: [admin]
+      operationId: adminRuleGenerate
+      summary: 上映枠の自動生成
+      description: '必要権限: admin。既存枠（予約済み・手動変更済みを含む）は削除・上書きせず、重複分はスキップ。'
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScreeningRuleInput' }
+      responses:
+        '201':
+          description: 生成結果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [created, skipped]
+                properties:
+                  created: { type: integer }
+                  skipped: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/screenings:
+    post:
+      tags: [admin]
+      operationId: adminCreateScreening
+      summary: 上映枠の手動作成（例外枠）
+      description: |
+        必要権限: admin。営業日は `starts_at` の JST 日付。`booking_closes_at` 省略時は開始時刻。
+        `starts_at` 省略、`visibility` 不正、`reserve_quota` が 0〜定員の範囲外は `400`。
+        同じ部門の他枠と時間が重なる `409 overlap`。
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [department_id, title, starts_at, duration_min, capacity]
+              properties:
+                department_id: { type: string, format: uuid }
+                title: { type: string, minLength: 1, maxLength: 50 }
+                starts_at: { type: string, format: date-time }
+                duration_min: { type: integer, minimum: 1 }
+                turnover_min: { type: integer, minimum: 0, default: 0 }
+                capacity: { type: integer, minimum: 1 }
+                reserve_quota: { type: [integer, 'null'], minimum: 0, description: 事前予約枠（null=定員まで） }
+                booking_opens_at: { type: [string, 'null'], format: date-time }
+                booking_closes_at: { type: [string, 'null'], format: date-time }
+                visibility: { $ref: '#/components/schemas/Visibility' }
+      responses:
+        '201':
+          description: 作成
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/screenings/{id}:
+    patch:
+      tags: [admin]
+      operationId: adminUpdateScreening
+      summary: 上映枠の更新
+      description: |
+        必要権限: admin。公開・受付・開催状態は独立に変更可。`run_status: cancelled` は不可（専用操作を使う, `400`）。
+        `visibility`・`booking_status`・`run_status` の不正値、空の `title` は `400`。
+        `run_status` は scheduled → running → finished の順にしか進められない（戻すと `422 invalid_transition`）。
+        中止済み `409 cancelled`。確保済み人数未満の定員 `422 capacity_below_taken`、予約済み未満の予約枠 `422 quota_below_reserved`。
+        定員が予約枠を下回るなど DB 制約違反は `400 invalid_value`。
+        `run_status: finished` にすると入場者へのクーポン自動発券を行う。応答は計算値（`taken`, `symbol` 等）を含む。
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                title: { type: string, minLength: 1, maxLength: 50 }
+                capacity: { type: integer, minimum: 1 }
+                reserve_quota: { type: integer, minimum: 0 }
+                clear_reserve_quota: { type: boolean, default: false, description: true で予約枠を無制限（null）に }
+                visibility: { $ref: '#/components/schemas/Visibility' }
+                booking_status: { $ref: '#/components/schemas/BookingStatus' }
+                run_status:
+                  type: string
+                  enum: [scheduled, running, finished]
+                booking_opens_at: { type: string, format: date-time }
+                booking_closes_at: { type: string, format: date-time }
+      responses:
+        '200':
+          description: 更新後の上映
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Screening' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /admin/screenings/{id}/cancel:
+    post:
+      tags: [admin]
+      operationId: adminCancelScreening
+      summary: 上映中止
+      description: |
+        必要権限: admin。有効な予約はすべて `cancelled_screening` になる（履歴は残す）。既に中止 `409 cancelled`。
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonRequired' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, affected_reservations]
+                properties:
+                  ok: { type: boolean, const: true }
+                  affected_reservations: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/coupon-definitions:
+    get:
+      tags: [admin]
+      operationId: adminListCouponDefinitions
+      summary: クーポン定義一覧
+      description: '必要権限: admin'
+      x-roles: [admin]
+      responses:
+        '200':
+          description: OK（作成日の降順）
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CouponDefinition' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [admin]
+      operationId: adminCreateCouponDefinition
+      summary: クーポン定義の作成
+      description: '必要権限: admin'
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CouponDefinitionInput' }
+      responses:
+        '201':
+          description: 作成
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/coupon-definitions/{id}:
+    put:
+      tags: [admin]
+      operationId: adminUpdateCouponDefinition
+      summary: クーポン定義の更新（全置換。発券済みには遡及しない）
+      description: '必要権限: admin。`active` を省略すると現状維持、それ以外の省略フィールドは既定値・null で上書きされる。列挙値の不正、`valid_until` ≦ `valid_from` などは `400`。'
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CouponDefinitionInput' }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/coupon-definitions/{id}/issue:
+    post:
+      tags: [admin]
+      operationId: adminManualIssueCoupons
+      summary: クーポンの手動発券
+      description: |
+        必要権限: admin。`count` 枚（1〜200）、各 `persons` 人分（1〜50）。0 以下は 1 とみなす。
+        定義が無効 `422 coupon_inactive`、発行上限 `422 coupon_issue_limit`。応答にトークンと URL を含む。
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                persons: { type: integer, minimum: 1, maximum: 50, default: 1 }
+                count: { type: integer, minimum: 1, maximum: 200, default: 1 }
+      responses:
+        '201':
+          description: 発券結果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [issued]
+                properties:
+                  issued:
+                    type: array
+                    items: { $ref: '#/components/schemas/ManuallyIssuedCoupon' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /admin/issued-coupons:
+    get:
+      tags: [admin]
+      operationId: adminListIssuedCoupons
+      summary: 発券済みクーポン一覧（最新 1000 件）
+      description: '必要権限: admin'
+      x-roles: [admin]
+      parameters:
+        - name: definition_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/IssuedCoupon' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/issued-coupons/{id}/revoke:
+    post:
+      tags: [admin]
+      operationId: adminRevokeCoupon
+      summary: 発券済みクーポンの失効
+      description: '必要権限: admin。有効（active）でない `409 not_active`。'
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonRequired' }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/blocks:
+    get:
+      tags: [admin]
+      operationId: adminListBlocks
+      summary: 来場者識別のブロック一覧
+      description: '必要権限: admin'
+      x-roles: [admin]
+      responses:
+        '200':
+          description: OK（作成日の降順）
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AccessBlock' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [admin]
+      operationId: adminCreateBlock
+      summary: 注文・予約の来場者識別をブロック
+      description: |
+        必要権限: admin。既存取引は自動取消しない。スタッフ入力の取引（識別なし）は `422 no_identity`。
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [source_type, source_id, scope, reason]
+              properties:
+                source_type: { type: string, enum: [order, reservation] }
+                source_id: { type: string, format: uuid }
+                scope: { $ref: '#/components/schemas/BlockScope' }
+                reason: { type: string, minLength: 1, maxLength: 200 }
+                ends_at: { type: [string, 'null'], format: date-time, description: 省略で無期限 }
+      responses:
+        '201':
+          description: 作成
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /admin/blocks/{id}/lift:
+    post:
+      tags: [admin]
+      operationId: adminLiftBlock
+      summary: ブロックの解除
+      description: '必要権限: admin。解除済み・存在しない `409 already_lifted`。'
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonRequired' }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/shift-slots:
+    post:
+      tags: [admin]
+      operationId: adminCreateShiftSlot
+      summary: シフト枠の作成
+      description: '必要権限: admin。営業日は `starts_at` の JST 日付。'
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [location, starts_at, ends_at, required_count]
+              properties:
+                location: { type: string, minLength: 1, maxLength: 50 }
+                starts_at: { type: string, format: date-time }
+                ends_at: { type: string, format: date-time }
+                required_count: { type: integer, minimum: 1 }
+                note: { type: string }
+      responses:
+        '201':
+          description: 作成
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/shift-slots/{id}:
+    patch:
+      tags: [admin]
+      operationId: adminUpdateShiftSlot
+      summary: シフト枠の更新
+      description: '必要権限: admin。配置済みの人に通知する。存在しない ID は `404`。終了が開始以前などの制約違反は `400 invalid_value`。'
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                location: { type: string }
+                starts_at: { type: string, format: date-time }
+                ends_at: { type: string, format: date-time }
+                required_count: { type: integer, minimum: 1 }
+                note: { type: string }
+                active: { type: boolean }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/shift-slots/{id}/assignments:
+    post:
+      tags: [admin]
+      operationId: adminAssignShift
+      summary: シフト枠への配置
+      description: '必要権限: admin。既に配置済み `409 duplicate`。'
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [member_id]
+              properties:
+                member_id: { type: string, format: uuid }
+      responses:
+        '201':
+          description: 作成した配置の ID
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/shift-assignments/{id}/remove:
+    post:
+      tags: [admin]
+      operationId: adminRemoveAssignment
+      summary: 配置の解除
+      description: '必要権限: admin。未完了の交代申請は取消。有効な配置でない `409 not_active`。'
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/shift-exchanges/{id}/decide:
+    post:
+      tags: [admin]
+      operationId: adminDecideExchange
+      summary: シフト交代の承認・却下
+      description: |
+        必要権限: admin。相手が承諾済み（accepted）の申請のみ（それ以外 `409 state_changed`）。
+        承認すると元の配置を外し相手の配置を作成。元の配置が変わっていれば `409 assignment_changed`。
+        `action` は `approve`/`reject` のみ（それ以外 `400`）。
+      x-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExchangeDecision' }
+      responses:
+        '200': { $ref: '#/components/responses/Ok' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /admin/audit-logs:
+    get:
+      tags: [admin]
+      operationId: adminAuditLogs
+      summary: 監査ログ
+      description: '必要権限: admin。新しい順。'
+      x-roles: [admin]
+      parameters:
+        - name: target_type
+          in: query
+          schema: { type: string }
+          example: order
+        - name: target_id
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          description: 件数（既定 200）。1〜1000 の範囲外・数値でない値は既定の 200 とみなす（エラーにならない）
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditLog' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: gs_session
+      description: |
+        ログイン時に設定される HttpOnly セッション Cookie。Cookie 認証で状態を変える要求には
+        `X-Requested-With` ヘッダが必要（CSRF 対策）。
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: '`POST /auth/login` の `token`。Authorization ヘッダ付きの要求は CSRF ヘッダ不要。'
+
+  headers:
+    IdempotentReplay:
+      description: 保存済みの応答を再送した場合に `true`
+      schema:
+        type: string
+        enum: ['true']
+
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      description: UUID（形式不正は 404）
+      schema: { type: string, format: uuid }
+    TokenPath:
+      name: token
+      in: path
+      required: true
+      description: 推測困難な秘密トークン（base64url）
+      schema: { type: string }
+    DayQuery:
+      name: day
+      in: query
+      required: false
+      description: 営業日 `YYYY-MM-DD`（形式不正は 400）
+      schema: { type: string, format: date }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: クライアントが生成する推測困難な操作 ID（最大 200 文字）。再送時は同じ値を使う。
+      schema: { type: string, maxLength: 200 }
+    XRequestedWith:
+      name: X-Requested-With
+      in: header
+      required: false
+      description: |
+        `Authorization` ヘッダを送らない状態変更要求では必須（CSRF 対策, 無いと `403 csrf`）。値は任意。
+      schema: { type: string }
+      example: XMLHttpRequest
+    XClientId:
+      name: X-Client-Id
+      in: header
+      required: false
+      description: アプリの来場者識別値（16〜200 文字）。送る場合は `X-Client-Kind` も必須。
+      schema: { type: string, minLength: 16, maxLength: 200 }
+    XClientKind:
+      name: X-Client-Kind
+      in: header
+      required: false
+      description: アプリの種類（`X-Client-Id` を送る場合は必須）
+      schema:
+        type: string
+        enum: [appclip, ios, android]
+    ClientCookie:
+      name: gs_cid
+      in: cookie
+      required: false
+      description: Web 来場者識別 Cookie（16〜100 文字）。無ければサーバーが発行する。
+      schema: { type: string }
+
+  responses:
+    Ok:
+      description: 成功
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/OkResponse' }
+    BadRequest:
+      description: 入力不正（`bad_request`, `invalid_value`, `invalid_credentials`(パスワード変更)）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: 未ログイン（`unauthorized`）・ログイン失敗（`invalid_credentials`）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: 権限不足・ブロック中（`forbidden`）、CSRF ヘッダ不足（`csrf`）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: 対象が無い（`not_found`）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: 状態の競合（`ErrorCode` の 409 系を参照）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unprocessable:
+      description: 業務ルール違反（`ErrorCode` の 422 系を参照）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooManyRequests:
+      description: 頻度制限（`rate_limited`, `locked`, `site_code_locked`）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InternalError:
+      description: サーバーエラー（`internal`, `no_stream`）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    # ---------------- 共通 ----------------
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message:
+              type: string
+              description: 利用者向けの日本語メッセージ
+            details:
+              type: object
+              additionalProperties: true
+              description: 追加情報（現状の実装では未使用）
+      example:
+        error:
+          code: sold_out
+          message: やきうどん（しょうゆ / 中）は売り切れです
+
+    ErrorCode:
+      type: string
+      description: |
+        | HTTP | code | 意味 |
+        |---|---|---|
+        | 400 | bad_request | 入力不正・Idempotency-Key 不足・外部キー不正 |
+        | 400 | invalid_credentials | 現在のパスワードが違う（パスワード変更） |
+        | 401 | unauthorized | ログインが必要 |
+        | 401 | invalid_credentials | ID またはパスワードが違う（ログイン） |
+        | 403 | forbidden | 権限不足・来場者識別のブロック |
+        | 403 | csrf | `X-Requested-With` 不足 |
+        | 404 | not_found | 対象が無い |
+        | 400 | invalid_value | DB の CHECK 制約違反（値の範囲・組み合わせが不正） |
+        | 409 | duplicate / overlap / retry | DB 一意・排他制約違反・再試行 |
+        | 409 | in_progress | 同じ Idempotency-Key を処理中 |
+        | 409 | already_admitted, already_cancelled, already_lifted, already_paid, assignment_changed, cancelled, cooking_started, coupon_changed, decided, duplicate_issue, not_active, not_admitted, not_applied, not_cancellable, not_editable, not_handable, not_handed, not_ready, order_closed, paid, state_changed, ticket_void, total_changed, unpaid | 状態の競合 |
+        | 422 | idempotency_mismatch | 同じキーで異なる内容 |
+        | 422 | already_assigned, balance_remaining, booking_closed, cancel_deadline, capacity_below_taken, coupon_expired, coupon_inactive, coupon_issue_limit, coupon_no_target, coupon_not_applicable, coupon_not_combinable, coupon_not_yet, coupon_persons, coupon_revoked, coupon_used, finished, full, insufficient, insufficient_balance, invalid_item, invalid_transition, item_stopped, item_unavailable, mobile_order_off, no_identity, no_wallet, not_enough_seats, not_open, order_still_paid, partial_refund_restore, pending_transfers, quota_below_reserved, refund_exceeds, screening_cancelled, site_code_invalid, sold_out, too_many_items, too_many_reservations, too_many_unpaid, voucher_change | 業務ルール違反 |
+        | 429 | rate_limited / locked / site_code_locked | 頻度制限・ロック |
+        | 500 | internal / no_stream | サーバーエラー |
+        | 503 | wallet_disabled | Apple Wallet 未設定 |
+      enum:
+        - bad_request
+        - invalid_credentials
+        - unauthorized
+        - forbidden
+        - csrf
+        - not_found
+        - invalid_value
+        - duplicate
+        - overlap
+        - retry
+        - in_progress
+        - already_admitted
+        - already_cancelled
+        - already_lifted
+        - already_paid
+        - assignment_changed
+        - cancelled
+        - cooking_started
+        - coupon_changed
+        - decided
+        - duplicate_issue
+        - not_active
+        - not_admitted
+        - not_applied
+        - not_cancellable
+        - not_editable
+        - not_handable
+        - not_handed
+        - not_ready
+        - order_closed
+        - paid
+        - state_changed
+        - ticket_void
+        - total_changed
+        - unpaid
+        - idempotency_mismatch
+        - already_assigned
+        - balance_remaining
+        - booking_closed
+        - cancel_deadline
+        - capacity_below_taken
+        - coupon_expired
+        - coupon_inactive
+        - coupon_issue_limit
+        - coupon_no_target
+        - coupon_not_applicable
+        - coupon_not_combinable
+        - coupon_not_yet
+        - coupon_persons
+        - coupon_revoked
+        - coupon_used
+        - finished
+        - full
+        - insufficient
+        - insufficient_balance
+        - invalid_item
+        - invalid_transition
+        - item_stopped
+        - item_unavailable
+        - mobile_order_off
+        - no_identity
+        - no_wallet
+        - not_enough_seats
+        - not_open
+        - order_still_paid
+        - partial_refund_restore
+        - pending_transfers
+        - quota_below_reserved
+        - refund_exceeds
+        - screening_cancelled
+        - site_code_invalid
+        - sold_out
+        - too_many_items
+        - too_many_reservations
+        - too_many_unpaid
+        - voucher_change
+        - rate_limited
+        - locked
+        - site_code_locked
+        - internal
+        - no_stream
+        - wallet_disabled
+
+    OkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean, const: true }
+
+    IdResponse:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string, format: uuid }
+
+    ReasonRequired:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 200 }
+
+    Role:
+      type: string
+      enum: [admin, cashier, kitchen, reception, treasurer, member, display]
+
+    Visibility:
+      type: string
+      enum: [public, hidden]
+      default: public
+
+    SaleStatus:
+      type: string
+      enum: [on_sale, sold_out, stopped]
+
+    BusinessStatus:
+      type: string
+      enum: [before, open, paused, closed]
+
+    DepartmentKind:
+      type: string
+      enum: [food, planetarium, goods]
+
+    CashMedium:
+      type: string
+      enum: [cash, voucher]
+      default: cash
+
+    CashAccountKind:
+      type: string
+      enum: [wallet, safe, register]
+
+    TransferStatus:
+      type: string
+      enum: [pending, confirmed, rejected, cancelled]
+
+    BookingStatus:
+      type: string
+      enum: [open, paused, closed]
+
+    RunStatus:
+      type: string
+      enum: [scheduled, running, finished, cancelled]
+
+    BlockScope:
+      type: string
+      enum: [order, reservation, both]
+
+    ShiftPreference:
+      type: string
+      enum: [want, ok, ng]
+
+    BusinessDaysResponse:
+      type: object
+      required: [days, today]
+      properties:
+        days:
+          type: array
+          items:
+            type: object
+            required: [id, day, label]
+            properties:
+              id: { type: string, format: uuid }
+              day: { type: string, format: date }
+              label: { type: string }
+        today: { type: string, format: date, description: Asia/Tokyo 基準の今日 }
+
+    # ---------------- 認証・部員 ----------------
+    Staff:
+      type: object
+      required: [id, name, login_id, roles]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        login_id: { type: string }
+        roles:
+          type: array
+          items: { $ref: '#/components/schemas/Role' }
+
+    LoginResponse:
+      type: object
+      required: [token, expires_at, staff]
+      properties:
+        token: { type: string, description: セッショントークン（Bearer 用。Cookie と同値） }
+        expires_at: { type: string, format: date-time }
+        staff: { $ref: '#/components/schemas/Staff' }
+
+    Member:
+      type: object
+      required: [id, name, login_id, active, created_at, roles, wallet_account_id]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        login_id: { type: string }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        roles:
+          type: array
+          items: { $ref: '#/components/schemas/Role' }
+        wallet_account_id:
+          type: [string, 'null']
+          format: uuid
+          description: 有効な個人財布の保管先 ID
+
+    MemberInput:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, maxLength: 50 }
+        login_id: { type: string, maxLength: 50, description: 作成時のみ有効 }
+        password: { type: string, minLength: 8 }
+        roles:
+          type: array
+          items: { $ref: '#/components/schemas/Role' }
+        active: { type: boolean, description: 更新時のみ有効 }
+        create_wallet: { type: boolean, default: true, description: 作成時のみ有効 }
+
+    Notification:
+      type: object
+      required: [id, kind, title, body, link, read_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind:
+          type: string
+          description: 例 `cash_transfer`, `shift`, `shift_exchange`
+        title: { type: string }
+        body: { type: string }
+        link: { type: string, description: Web 画面への相対パス }
+        read_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+
+    AuditLog:
+      type: object
+      required: [id, action, target_type, target_id, detail, created_at, member_name]
+      properties:
+        id: { type: integer }
+        action: { type: string, example: order.cancel }
+        target_type: { type: string }
+        target_id: { type: string }
+        detail:
+          type: object
+          additionalProperties: true
+        created_at: { type: string, format: date-time }
+        member_name: { type: [string, 'null'] }
+
+    Limits:
+      type: object
+      properties:
+        seat_threshold_percent: { type: integer, minimum: 1, maximum: 100, default: 70, description: 空席△の閾値（%） }
+        unpaid_warn_minutes: { type: integer, default: 15 }
+        cooking_warn_minutes: { type: integer, default: 15 }
+        max_unpaid_orders: { type: integer, minimum: 1, default: 2 }
+        max_items_per_order: { type: integer, minimum: 1, default: 10 }
+        max_party_size: { type: integer, minimum: 1, default: 6 }
+        max_future_reservations: { type: integer, minimum: 1, default: 2 }
+        site_code_fail_limit: { type: integer, minimum: 1, default: 5 }
+        site_code_fail_window_min: { type: integer, minimum: 1, default: 10 }
+        orders_per_minute: { type: integer, minimum: 1, default: 3 }
+        reservations_per_minute: { type: integer, minimum: 1, default: 3 }
+        display_stale_seconds: { type: integer, minimum: 1, default: 30 }
+        visitor_cancel_before_min: { type: integer, default: 0, description: 上映開始の何分前まで本人取消可 }
+
+    # ---------------- 部門・表示 ----------------
+    Department:
+      type: object
+      required: [id, code, name, kind, business_status, mobile_order_enabled, site_code_enabled,
+                 site_code_interval_sec, site_code_grace_sec, notice, sort_order]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        kind: { $ref: '#/components/schemas/DepartmentKind' }
+        business_status: { $ref: '#/components/schemas/BusinessStatus' }
+        mobile_order_enabled: { type: boolean }
+        site_code_enabled: { type: boolean }
+        site_code_interval_sec: { type: integer }
+        site_code_grace_sec: { type: integer }
+        notice: { type: string }
+        sort_order: { type: integer }
+
+    BoardResponse:
+      type: object
+      required: [department, cooking, ready, server_time]
+      properties:
+        department:
+          type: object
+          required: [id, name, business_status, mobile_order_enabled, site_code_enabled, notice]
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            business_status: { $ref: '#/components/schemas/BusinessStatus' }
+            mobile_order_enabled: { type: boolean }
+            site_code_enabled: { type: boolean }
+            notice: { type: string }
+        cooking:
+          type: array
+          description: 調理待ち・調理中の呼出番号
+          items: { type: integer }
+        ready:
+          type: array
+          description: 受渡可能な呼出番号
+          items: { type: integer }
+        server_time: { type: string, format: date-time }
+
+    SiteCode:
+      type: object
+      required: [enabled, server_time]
+      properties:
+        enabled: { type: boolean }
+        code: { type: string, pattern: '^[0-9]{3}$', description: enabled=true のときのみ }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+        server_time: { type: string, format: date-time }
+
+    DisplayStatus:
+      type: object
+      required: [name, screen, last_seen_at, department_name, stale]
+      properties:
+        name: { type: string, description: 端末アカウントの部員名 }
+        screen: { type: string }
+        last_seen_at: { type: string, format: date-time }
+        department_name: { type: [string, 'null'] }
+        stale: { type: boolean }
+
+    # ---------------- 商品 ----------------
+    CatalogResponse:
+      type: object
+      required: [department, products]
+      properties:
+        department: { $ref: '#/components/schemas/Department' }
+        products:
+          type: array
+          items: { $ref: '#/components/schemas/Product' }
+
+    Product:
+      type: object
+      required: [id, department_id, name, description, needs_cooking, visibility, active, sort_order, option_groups, variants]
+      properties:
+        id: { type: string, format: uuid }
+        department_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        needs_cooking: { type: boolean }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+        active: { type: boolean }
+        sort_order: { type: integer }
+        option_groups:
+          type: array
+          items: { $ref: '#/components/schemas/OptionGroup' }
+        variants:
+          type: array
+          items: { $ref: '#/components/schemas/Variant' }
+
+    OptionGroup:
+      type: object
+      required: [id, name, sort_order, active, values]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: 味 }
+        sort_order: { type: integer }
+        active: { type: boolean }
+        values:
+          type: array
+          items: { $ref: '#/components/schemas/OptionValue' }
+
+    OptionValue:
+      type: object
+      required: [id, name, sort_order, active]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: しょうゆ }
+        sort_order: { type: integer }
+        active: { type: boolean }
+
+    Variant:
+      type: object
+      description: 選択肢の組み合わせごとの価格・販売状態
+      required: [id, price, visibility, sale_status, active, sort_order, option_value_ids, label]
+      properties:
+        id: { type: string, format: uuid }
+        price: { type: integer }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+        sale_status: { $ref: '#/components/schemas/SaleStatus' }
+        active: { type: boolean }
+        sort_order: { type: integer }
+        option_value_ids:
+          type: array
+          items: { type: string, format: uuid }
+        label: { type: string, example: しょうゆ / 中, description: 選択肢名を ' / ' で連結（選択肢なしは空文字） }
+
+    OptionGroupInput:
+      type: object
+      additionalProperties: false
+      required: [name, values]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 30 }
+        values:
+          type: array
+          minItems: 1
+          items: { type: string, minLength: 1, maxLength: 30 }
+
+    OptionUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 30 }
+        active: { type: boolean }
+        sort_order: { type: integer }
+
+    # ---------------- 注文 ----------------
+    ItemRequest:
+      type: object
+      additionalProperties: false
+      required: [variant_id, quantity]
+      properties:
+        variant_id: { type: string, format: uuid }
+        quantity: { type: integer, minimum: 1, maximum: 99, description: 同じ variant_id は合算される }
+
+    PricedItem:
+      type: object
+      required: [variant_id, product_id, product_name, options_label, options, unit_price, quantity, line_total, needs_cooking]
+      properties:
+        variant_id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        product_name: { type: string }
+        options_label: { type: string }
+        options:
+          type: array
+          items:
+            type: object
+            required: [group, value, value_id]
+            properties:
+              group: { type: string }
+              value: { type: string }
+              value_id: { type: string, format: uuid }
+        unit_price: { type: integer }
+        quantity: { type: integer }
+        line_total: { type: integer }
+        needs_cooking: { type: boolean }
+
+    PublicOrderCreated:
+      type: object
+      required: [id, call_number, total, access_token, status_url]
+      properties:
+        id: { type: string, format: uuid }
+        call_number: { type: integer, description: 部門・営業日ごとの呼出番号 }
+        total: { type: integer }
+        access_token: { type: string, description: '注文確認用トークン（`/public/orders/by-token/{token}`）' }
+        status_url: { type: string, format: uri, description: '`<PUBLIC_BASE_URL>/o/<token>`' }
+
+    OrderStatus:
+      type: string
+      enum: [accepted, cancelled, completed]
+
+    PaymentStatus:
+      type: string
+      enum: [unpaid, paid, partially_refunded, refunded]
+
+    HandoffStatus:
+      type: string
+      enum: [pending, handed]
+
+    CookStatus:
+      type: string
+      enum: [waiting, cooking, cooked, cancelled, not_required]
+
+    OrderChannel:
+      type: string
+      enum: [staff, web, appclip, ios, android]
+
+    OrderItem:
+      type: object
+      description: 注文明細（販売時点のスナップショット）
+      required: [id, product_name, options_label, unit_price, quantity, line_total, discount, needs_cooking, cook_status, variant_id, product_id]
+      properties:
+        id: { type: string, format: uuid }
+        product_name: { type: string }
+        options_label: { type: string }
+        unit_price: { type: integer }
+        quantity: { type: integer }
+        line_total: { type: integer }
+        discount: { type: integer, description: この明細に配分された割引額 }
+        needs_cooking: { type: boolean }
+        cook_status: { $ref: '#/components/schemas/CookStatus' }
+        variant_id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+
+    OrderCouponRedemption:
+      type: object
+      description: 注文に適用されたクーポン利用記録
+      required: [id, coupon_no, name, persons, discount, status, forfeited_persons]
+      properties:
+        id: { type: string, format: uuid, description: '利用記録 ID（`/staff/redemptions/{id}/reverse` に使う）' }
+        coupon_no: { type: string, example: C-ACD347 }
+        name: { type: string }
+        persons: { type: integer }
+        discount: { type: integer }
+        status: { type: string, enum: [applied, reversed] }
+        forfeited_persons: { type: integer, description: 分割不可のため失効した人数 }
+
+    Order:
+      type: object
+      description: 注文詳細（来場者向け）
+      required: [id, department_id, department_name, business_day, call_number, channel, status, payment_status,
+                 handoff_status, subtotal, discount, total, created_at, handed_at, items, coupons, ready]
+      properties:
+        id: { type: string, format: uuid }
+        department_id: { type: string, format: uuid }
+        department_name: { type: string }
+        business_day: { type: string, format: date }
+        call_number: { type: integer }
+        channel: { $ref: '#/components/schemas/OrderChannel' }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        payment_status: { $ref: '#/components/schemas/PaymentStatus' }
+        handoff_status: { $ref: '#/components/schemas/HandoffStatus' }
+        subtotal: { type: integer }
+        discount: { type: integer }
+        total: { type: integer }
+        created_at: { type: string, format: date-time }
+        handed_at: { type: [string, 'null'], format: date-time }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OrderItem' }
+        coupons:
+          type: array
+          items: { $ref: '#/components/schemas/OrderCouponRedemption' }
+        ready:
+          type: boolean
+          description: 受付中で、調理待ち・調理中の明細が無く、有効な明細が 1 つ以上ある
+
+    Payment:
+      type: object
+      required: [id, amount, cash_received, voucher_received, change_given, created_at, member_name, cash_account_name, refunded]
+      properties:
+        id: { type: string, format: uuid }
+        amount: { type: integer, description: 請求額（割引後） }
+        cash_received: { type: integer }
+        voucher_received: { type: integer }
+        change_given: { type: integer }
+        created_at: { type: string, format: date-time }
+        member_name: { type: string }
+        cash_account_name: { type: [string, 'null'] }
+        refunded: { type: integer, description: この入金に対する返金累計 }
+
+    Refund:
+      type: object
+      required: [id, amount, reason, created_at, member_name]
+      properties:
+        id: { type: string, format: uuid }
+        amount: { type: integer }
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
+        member_name: { type: string }
+
+    OrderEvent:
+      type: object
+      required: [id, kind, from, to, reason, created_at, member_name]
+      properties:
+        id: { type: integer }
+        kind:
+          type: string
+          description: create / cook / cook_correction / item_cancel / cancel / payment / refund / handoff / handoff_correction
+        from: { type: [string, 'null'] }
+        to: { type: [string, 'null'] }
+        reason: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        member_name: { type: [string, 'null'] }
+
+    StaffOrder:
+      description: 注文詳細（スタッフ向け。支払・返金・履歴を含む）
+      allOf:
+        - $ref: '#/components/schemas/Order'
+        - type: object
+          required: [has_client_identity, created_by_name, handed_by_name, cancel_reason, unpaid_handoff_reason, payments, refunds, events]
+          properties:
+            has_client_identity: { type: boolean, description: 来場者識別がある（ブロック可能） }
+            created_by_name: { type: [string, 'null'] }
+            handed_by_name: { type: [string, 'null'] }
+            cancel_reason: { type: [string, 'null'] }
+            unpaid_handoff_reason: { type: [string, 'null'] }
+            payments:
+              type: array
+              items: { $ref: '#/components/schemas/Payment' }
+            refunds:
+              type: array
+              items: { $ref: '#/components/schemas/Refund' }
+            events:
+              type: array
+              items: { $ref: '#/components/schemas/OrderEvent' }
+
+    OrderSummary:
+      type: object
+      description: 注文一覧の 1 行
+      required: [id, call_number, channel, status, payment_status, handoff_status, subtotal, discount, total,
+                 created_at, elapsed_sec, unpaid_warning, items, ready]
+      properties:
+        id: { type: string, format: uuid }
+        call_number: { type: integer }
+        channel: { $ref: '#/components/schemas/OrderChannel' }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        payment_status: { $ref: '#/components/schemas/PaymentStatus' }
+        handoff_status: { $ref: '#/components/schemas/HandoffStatus' }
+        subtotal: { type: integer }
+        discount: { type: integer }
+        total: { type: integer }
+        created_at: { type: string, format: date-time }
+        elapsed_sec: { type: integer }
+        unpaid_warning: { type: boolean, description: 未払いのまま `unpaid_warn_minutes` 経過 }
+        items:
+          type: array
+          items:
+            type: object
+            required: [id, product_name, options_label, quantity, line_total, cook_status]
+            properties:
+              id: { type: string, format: uuid }
+              product_name: { type: string }
+              options_label: { type: string }
+              quantity: { type: integer }
+              line_total: { type: integer }
+              cook_status: { $ref: '#/components/schemas/CookStatus' }
+        ready: { type: boolean }
+
+    KitchenOrder:
+      type: object
+      required: [id, call_number, payment_status, status, channel, created_at, elapsed_sec, long_wait, unpaid_warning, items]
+      properties:
+        id: { type: string, format: uuid }
+        call_number: { type: integer }
+        payment_status: { $ref: '#/components/schemas/PaymentStatus' }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        channel: { $ref: '#/components/schemas/OrderChannel' }
+        created_at: { type: string, format: date-time }
+        elapsed_sec: { type: integer }
+        long_wait: { type: boolean, description: '`cooking_warn_minutes` 以上経過' }
+        unpaid_warning: { type: boolean }
+        items:
+          type: array
+          description: 調理が必要な明細のみ
+          items:
+            type: object
+            required: [id, product_name, options_label, quantity, cook_status, updated_at]
+            properties:
+              id: { type: string, format: uuid }
+              product_name: { type: string }
+              options_label: { type: string }
+              quantity: { type: integer }
+              cook_status: { $ref: '#/components/schemas/CookStatus' }
+              updated_at: { type: string, format: date-time }
+
+    # ---------------- クーポン ----------------
+    CouponUse:
+      type: object
+      additionalProperties: false
+      required: [token, persons]
+      properties:
+        token: { type: string, description: クーポン QR のトークン }
+        persons: { type: integer, minimum: 1, description: 利用人数（残人数以下） }
+
+    CouponLine:
+      type: object
+      description: 見積でのクーポン適用結果
+      required: [issued_coupon_id, coupon_no, name, persons, discount, forfeited_persons]
+      properties:
+        issued_coupon_id: { type: string, format: uuid }
+        coupon_no: { type: string }
+        name: { type: string }
+        persons: { type: integer }
+        discount: { type: integer }
+        forfeited_persons: { type: integer }
+        note: { type: string, description: 分割利用不可で残人数が失効する場合の注意 }
+
+    PaymentQuote:
+      type: object
+      required: [subtotal, discount, total, coupons]
+      properties:
+        subtotal: { type: integer }
+        discount: { type: integer }
+        total: { type: integer }
+        coupons:
+          type: array
+          items: { $ref: '#/components/schemas/CouponLine' }
+
+    CouponSnapshot:
+      type: object
+      description: 発券時に固定された条件（定義の変更は遡及しない）
+      required: [name, description, discount_type, discount_value, scope, target_product_ids, target_variant_ids,
+                 items_per_person, allocation, holder_mode, splittable, combinable]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        discount_type: { type: string, enum: [fixed, percent], description: 'fixed=円, percent=％（1円未満切捨て）' }
+        discount_value: { type: integer }
+        scope: { type: string, enum: [order, items], description: 'order=注文全体, items=対象商品' }
+        target_department_id: { type: string, format: uuid, description: 指定時はその部門のみ（省略=全部門） }
+        target_product_ids:
+          type: array
+          items: { type: string, format: uuid }
+        target_variant_ids:
+          type: array
+          items: { type: string, format: uuid }
+        items_per_person: { type: integer, description: 'scope=items のとき 1 人あたりの割引点数' }
+        allocation: { type: string, enum: [highest_price_first, lowest_price_first] }
+        max_discount: { type: integer, description: 割引上限（円） }
+        holder_mode: { type: string, enum: [per_person, group], description: 自動発券時に 1 人 1 枚か、予約単位 1 枚か }
+        splittable: { type: boolean, description: false なら一部人数で使うと残りは失効 }
+        combinable: { type: boolean, description: 他クーポンとの併用可否 }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+
+    CouponStatus:
+      type: string
+      enum: [active, used, revoked]
+
+    CouponVerifyResult:
+      type: object
+      required: [id, coupon_no, status, persons_total, persons_remaining, conditions, usable, summary]
+      properties:
+        id: { type: string, format: uuid }
+        coupon_no: { type: string }
+        status: { $ref: '#/components/schemas/CouponStatus' }
+        persons_total: { type: integer }
+        persons_remaining: { type: integer }
+        conditions: { $ref: '#/components/schemas/CouponSnapshot' }
+        usable: { type: boolean }
+        summary: { type: string, example: 対象商品1点/人まで1点50円引き・併用不可 }
+        reason: { type: string, description: usable=false の理由 }
+
+    PublicCoupon:
+      type: object
+      required: [id, coupon_no, name, description, conditions, persons_total, persons_remaining, status,
+                 valid_from, valid_until, created_at, summary, token]
+      properties:
+        id: { type: string, format: uuid }
+        coupon_no: { type: string }
+        name: { type: string }
+        description: { type: string }
+        conditions: { $ref: '#/components/schemas/CouponSnapshot' }
+        persons_total: { type: integer }
+        persons_remaining: { type: integer }
+        status: { $ref: '#/components/schemas/CouponStatus' }
+        valid_from: { type: [string, 'null'], format: date-time }
+        valid_until: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+        summary: { type: string }
+        token: { type: string, description: 要求パスのトークン（QR 表示用） }
+
+    CouponDefinitionInput:
+      type: object
+      additionalProperties: false
+      required: [name, discount_type, discount_value, scope]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 50 }
+        description: { type: string }
+        discount_type: { type: string, enum: [fixed, percent] }
+        discount_value: { type: integer, minimum: 1, description: percent は 100 以下 }
+        scope: { type: string, enum: [order, items] }
+        target_department_id: { type: string, format: uuid }
+        target_product_ids:
+          type: array
+          description: scope=items では target_product_ids / target_variant_ids の少なくとも 1 つが必須
+          items: { type: string, format: uuid }
+        target_variant_ids:
+          type: array
+          items: { type: string, format: uuid }
+        items_per_person: { type: integer, minimum: 1, default: 1 }
+        allocation: { type: string, enum: [highest_price_first, lowest_price_first], default: highest_price_first }
+        max_discount: { type: [integer, 'null'], minimum: 1 }
+        holder_mode: { type: string, enum: [per_person, group], default: per_person }
+        splittable: { type: boolean, default: false }
+        combinable: { type: boolean, default: false }
+        valid_from: { type: [string, 'null'], format: date-time }
+        valid_until: { type: [string, 'null'], format: date-time }
+        max_issues: { type: [integer, 'null'], minimum: 1 }
+        auto_issue: { type: string, enum: [none, screening_attended], default: none, description: 'screening_attended=上映終了後、入場者に自動発券' }
+        active: { type: boolean, description: 作成時の既定 true、更新時は省略で現状維持 }
+
+    CouponDefinition:
+      type: object
+      required: [id, name, description, discount_type, discount_value, scope, target_department_id, items_per_person,
+                 allocation, max_discount, holder_mode, splittable, combinable, valid_from, valid_until, max_issues,
+                 auto_issue, active, created_by, created_at, updated_at, target_product_ids, target_variant_ids,
+                 issued_count, used_persons]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        discount_type: { type: string, enum: [fixed, percent] }
+        discount_value: { type: integer }
+        scope: { type: string, enum: [order, items] }
+        target_department_id: { type: [string, 'null'], format: uuid }
+        items_per_person: { type: integer }
+        allocation: { type: string, enum: [highest_price_first, lowest_price_first] }
+        max_discount: { type: [integer, 'null'] }
+        holder_mode: { type: string, enum: [per_person, group] }
+        splittable: { type: boolean }
+        combinable: { type: boolean }
+        valid_from: { type: [string, 'null'], format: date-time }
+        valid_until: { type: [string, 'null'], format: date-time }
+        max_issues: { type: [integer, 'null'] }
+        auto_issue: { type: string, enum: [none, screening_attended] }
+        active: { type: boolean }
+        created_by: { type: [string, 'null'], format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        target_product_ids:
+          type: array
+          items: { type: string, format: uuid }
+        target_variant_ids:
+          type: array
+          items: { type: string, format: uuid }
+        issued_count: { type: integer }
+        used_persons: { type: integer, description: 適用中の利用人数の合計 }
+
+    IssuedCoupon:
+      type: object
+      description: 発券済みクーポン（管理一覧）
+      required: [id, public_no, definition_id, name, persons_total, persons_remaining, status, valid_from, valid_until,
+                 source_kind, created_at, revoke_reason, reservation_no]
+      properties:
+        id: { type: string, format: uuid }
+        public_no: { type: string, example: C-ACD347 }
+        definition_id: { type: string, format: uuid }
+        name: { type: string }
+        persons_total: { type: integer }
+        persons_remaining: { type: integer }
+        status: { $ref: '#/components/schemas/CouponStatus' }
+        valid_from: { type: [string, 'null'], format: date-time }
+        valid_until: { type: [string, 'null'], format: date-time }
+        source_kind: { type: string, enum: [auto_screening, manual] }
+        created_at: { type: string, format: date-time }
+        revoke_reason: { type: [string, 'null'] }
+        reservation_no: { type: [string, 'null'], description: 自動発券元の予約番号 }
+
+    ManuallyIssuedCoupon:
+      type: object
+      required: [id, coupon_no, token, url]
+      properties:
+        id: { type: string, format: uuid }
+        coupon_no: { type: string }
+        token: { type: string }
+        url: { type: string, format: uri, description: '`<PUBLIC_BASE_URL>/c/<token>`' }
+
+    # ---------------- プラネタリウム ----------------
+    SeatSymbol:
+      type: string
+      enum: ['○', '△', '×']
+      description: '○=空席あり, △=確保人数が閾値以上, ×=満席'
+
+    Screening:
+      type: object
+      description: 上映（スタッフ向け、内訳・計算値付き）
+      required: [id, department_id, title, business_day, starts_at, ends_at, capacity, reserve_quota, reserved_count,
+                 walkin_count, booking_opens_at, booking_closes_at, visibility, booking_status, run_status, manually_edited,
+                 admitted_count, taken, symbol, status_text, advance_available, walkin_available, advance_open]
+      properties:
+        id: { type: string, format: uuid }
+        department_id: { type: string, format: uuid }
+        title: { type: string }
+        business_day: { type: string, format: date }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        capacity: { type: integer }
+        reserve_quota: { type: [integer, 'null'], description: 事前予約に割り当てる上限（null=定員まで） }
+        reserved_count: { type: integer, description: 事前予約の確保人数 }
+        walkin_count: { type: integer, description: 当日受付の確保人数 }
+        booking_opens_at: { type: [string, 'null'], format: date-time }
+        booking_closes_at: { type: [string, 'null'], format: date-time }
+        visibility: { $ref: '#/components/schemas/Visibility' }
+        booking_status: { $ref: '#/components/schemas/BookingStatus' }
+        run_status: { $ref: '#/components/schemas/RunStatus' }
+        manually_edited: { type: boolean }
+        cancel_reason: { type: string, description: 中止時のみ }
+        admitted_count: { type: integer }
+        taken: { type: integer, description: reserved_count + walkin_count }
+        symbol: { $ref: '#/components/schemas/SeatSymbol' }
+        status_text: { type: string, description: '上映中止 / 上映終了 / 上映中 / 受付停止中 / 受付終了 / 受付開始前 / 事前予約終了 / 空' }
+        advance_available: { type: integer, description: 事前予約で確保できる残り人数 }
+        walkin_available: { type: integer, description: 当日受付で確保できる残り人数 }
+        advance_open: { type: boolean, description: 現在事前予約を受け付けているか }
+
+    PublicScreening:
+      type: object
+      required: [id, title, business_day, starts_at, ends_at, symbol, status_text, advance_open, advance_available, walkin_available, run_status]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        business_day: { type: string, format: date }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        symbol: { $ref: '#/components/schemas/SeatSymbol' }
+        status_text: { type: string }
+        advance_open: { type: boolean }
+        advance_available: { type: boolean }
+        walkin_available: { type: boolean, description: 当日枠に空きがあり、run_status=scheduled }
+        run_status: { $ref: '#/components/schemas/RunStatus' }
+
+    PublicScreeningDetail:
+      allOf:
+        - $ref: '#/components/schemas/PublicScreening'
+        - type: object
+          required: [max_party_size]
+          properties:
+            max_party_size: { type: integer, description: 'min(max_party_size 設定, 事前予約の残り人数)' }
+
+    ScreeningBoardItem:
+      type: object
+      required: [id, title, starts_at, ends_at, symbol, status_text, run_status, advance_open, walkin_available]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        symbol: { $ref: '#/components/schemas/SeatSymbol' }
+        status_text: { type: string }
+        run_status: { $ref: '#/components/schemas/RunStatus' }
+        advance_open: { type: boolean, description: 受付中かつ残りあり }
+        walkin_available: { type: boolean }
+
+    ReservationCreated:
+      type: object
+      required: [id, reservation_no, access_token, url]
+      properties:
+        id: { type: string, format: uuid }
+        reservation_no: { type: string, example: 17-001, description: '`DD-NNN`（営業日の日・通番）' }
+        access_token: { type: string }
+        url: { type: string, format: uri, description: '`<PUBLIC_BASE_URL>/r/<token>`' }
+
+    ReservationStatus:
+      type: string
+      enum: [confirmed, cancelled_self, cancelled_staff, cancelled_screening]
+
+    Ticket:
+      type: object
+      description: 入場チケット（1 人 1 枚）
+      required: [id, seq, ticket_no, status, admitted_at]
+      properties:
+        id: { type: string, format: uuid }
+        seq: { type: integer }
+        ticket_no: { type: string, example: 17-001-1 }
+        status: { type: string, enum: [valid, void] }
+        admitted_at: { type: [string, 'null'], format: date-time }
+        entry_token:
+          type: string
+          description: 入場 QR トークン（来場者向け応答・当日受付応答のみ）
+
+    ReservationCoupon:
+      type: object
+      description: 予約に紐づいて自動発券されたクーポン
+      required: [id, coupon_no, name, persons_total, persons_remaining, status, valid_until]
+      properties:
+        id: { type: string, format: uuid }
+        coupon_no: { type: string }
+        name: { type: string }
+        persons_total: { type: integer }
+        persons_remaining: { type: integer }
+        status: { $ref: '#/components/schemas/CouponStatus' }
+        valid_until: { type: [string, 'null'], format: date-time }
+        token: { type: string, description: クーポン QR トークン（来場者向け応答・当日受付応答のみ） }
+
+    Reservation:
+      type: object
+      description: 予約詳細
+      required: [id, reservation_no, kind, name, party_size, status, cancel_reason, created_at, cancelled_at, screening, tickets, coupons]
+      properties:
+        id: { type: string, format: uuid }
+        reservation_no: { type: string }
+        kind: { type: string, enum: [advance, walkin] }
+        name: { type: string }
+        party_size: { type: integer }
+        status: { $ref: '#/components/schemas/ReservationStatus' }
+        cancel_reason: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        cancelled_at: { type: [string, 'null'], format: date-time }
+        screening:
+          type: object
+          required: [id, title, starts_at, ends_at, run_status, business_day, cancel_reason]
+          properties:
+            id: { type: string, format: uuid }
+            title: { type: string }
+            starts_at: { type: string, format: date-time }
+            ends_at: { type: string, format: date-time }
+            run_status: { $ref: '#/components/schemas/RunStatus' }
+            business_day: { type: string, format: date }
+            cancel_reason: { type: [string, 'null'] }
+        tickets:
+          type: array
+          items: { $ref: '#/components/schemas/Ticket' }
+        coupons:
+          type: array
+          items: { $ref: '#/components/schemas/ReservationCoupon' }
+
+    ReservationListItem:
+      type: object
+      required: [id, reservation_no, kind, name, party_size, status, created_at, cancel_reason, screening_id, title,
+                 starts_at, has_client_identity, admitted, tickets]
+      properties:
+        id: { type: string, format: uuid }
+        reservation_no: { type: string }
+        kind: { type: string, enum: [advance, walkin] }
+        name: { type: string }
+        party_size: { type: integer }
+        status: { $ref: '#/components/schemas/ReservationStatus' }
+        created_at: { type: string, format: date-time }
+        cancel_reason: { type: [string, 'null'] }
+        screening_id: { type: string, format: uuid }
+        title: { type: string }
+        starts_at: { type: string, format: date-time }
+        has_client_identity: { type: boolean }
+        admitted: { type: integer, description: 入場済み人数 }
+        tickets:
+          type: array
+          items:
+            type: object
+            required: [id, ticket_no, status, admitted_at]
+            properties:
+              id: { type: string, format: uuid }
+              ticket_no: { type: string }
+              status: { type: string, enum: [valid, void] }
+              admitted_at: { type: [string, 'null'], format: date-time }
+
+    CheckinRequest:
+      type: object
+      additionalProperties: false
+      description: '`token`（QR の値。URL 形式 `…/<token>` も可）か `ticket_no` のどちらか。token が優先。'
+      properties:
+        token: { type: string }
+        ticket_no: { type: string, example: 17-001-1 }
+        screening_id:
+          type: string
+          format: uuid
+          description: 受付中の上映。指定すると別の回のチケットを `wrong_screening` とする
+
+    TicketInfo:
+      type: object
+      required: [id, ticket_no, seq, status, reservation_status, reservation_no, name, party_size, screening_id, title, starts_at, run_status]
+      properties:
+        id: { type: string, format: uuid }
+        ticket_no: { type: string }
+        seq: { type: integer }
+        status: { type: string, enum: [valid, void] }
+        reservation_status: { $ref: '#/components/schemas/ReservationStatus' }
+        reservation_no: { type: string }
+        name: { type: string }
+        party_size: { type: integer }
+        screening_id: { type: string, format: uuid }
+        title: { type: string }
+        starts_at: { type: string, format: date-time }
+        run_status: { $ref: '#/components/schemas/RunStatus' }
+        admitted_at: { type: string, format: date-time, description: 入場済みの場合のみ }
+
+    CheckinResult:
+      type: object
+      required: [result, message]
+      properties:
+        result:
+          type: string
+          description: |
+            `ok`（verify のみ：入場可能）, `admitted`（入場確定）, `already_admitted`, `cancelled`（取消済み・無効）,
+            `wrong_screening`, `screening_cancelled`, `finished`, `not_found`
+          enum: [ok, admitted, already_admitted, cancelled, wrong_screening, screening_cancelled, finished, not_found]
+        message: { type: string }
+        ticket: { $ref: '#/components/schemas/TicketInfo' }
+
+    ScreeningRuleInput:
+      type: object
+      additionalProperties: false
+      required: [department_id, business_day, title, window_start, window_end, duration_min, capacity]
+      properties:
+        department_id: { type: string, format: uuid }
+        business_day: { type: string, format: date }
+        title: { type: string, minLength: 1, maxLength: 50 }
+        window_start: { type: string, pattern: '^\d{2}:\d{2}$', example: '10:00' }
+        window_end: { type: string, pattern: '^\d{2}:\d{2}$', example: '16:00' }
+        interval_min: { type: integer, minimum: 5, default: 15, description: 開始間隔（0 は 15 とみなす） }
+        duration_min: { type: integer, minimum: 1 }
+        turnover_min: { type: integer, minimum: 0, default: 0, description: duration_min + turnover_min ≦ interval_min }
+        capacity: { type: integer, minimum: 1, maximum: 500 }
+        reserve_quota: { type: [integer, 'null'], minimum: 0 }
+        booking_opens_before_min: { type: [integer, 'null'], description: 上映開始の何分前から予約受付（null=即時） }
+        booking_closes_before_min: { type: integer, default: 0 }
+
+    PlannedSlot:
+      type: object
+      required: [starts_at, ends_at]
+      properties:
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        conflict: { type: string, description: 既存枠と重複する場合の理由（作成しない） }
+
+    # ---------------- 現金 ----------------
+    CashAccount:
+      type: object
+      required: [id, name, kind, member_id, active, member_name, kind_order, cash_balance, voucher_balance, pending_transfers, last_reconciliation]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        kind: { $ref: '#/components/schemas/CashAccountKind' }
+        member_id: { type: [string, 'null'], format: uuid }
+        active: { type: boolean }
+        member_name: { type: [string, 'null'] }
+        kind_order: { type: integer, description: '並び順（safe=0, register=1, wallet=2）' }
+        cash_balance: { type: integer, description: 現金の理論残高 }
+        voucher_balance: { type: integer, description: 金券の理論残高 }
+        pending_transfers: { type: integer }
+        last_reconciliation:
+          type: [object, 'null']
+          description: 直近の現金精算
+          required: [created_at, difference]
+          properties:
+            created_at: { type: string, format: date-time }
+            difference: { type: integer }
+
+    CashDestination:
+      type: object
+      required: [id, name, kind, member_name, kind_order]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        kind: { $ref: '#/components/schemas/CashAccountKind' }
+        member_name: { type: [string, 'null'], description: 個人財布の持ち主 }
+        kind_order: { type: integer, description: '並び順（safe=0, register=1, wallet=2）' }
+
+    CashAccountsResponse:
+      type: object
+      required: [accounts, total, can_view_all]
+      properties:
+        accounts:
+          type: array
+          items: { $ref: '#/components/schemas/CashAccount' }
+        total:
+          type: object
+          description: 全保管先の合計（can_view_all=false のときは 0）
+          required: [cash, voucher]
+          properties:
+            cash: { type: integer }
+            voucher: { type: integer }
+        can_view_all: { type: boolean }
+
+    CashEntry:
+      type: object
+      required: [id, medium, kind, amount, reason, created_at, member_name, call_number, transfer_id, reconciliation_id]
+      properties:
+        id: { type: integer }
+        medium: { $ref: '#/components/schemas/CashMedium' }
+        kind: { type: string, enum: [opening, sale, refund, transfer_in, transfer_out, adjustment] }
+        amount: { type: integer, description: 符号付き（出金は負） }
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
+        member_name: { type: string }
+        call_number: { type: [integer, 'null'], description: 売上の場合の注文呼出番号 }
+        transfer_id: { type: [string, 'null'], format: uuid }
+        reconciliation_id: { type: [string, 'null'], format: uuid }
+
+    CashTransfer:
+      type: object
+      required: [id, kind, medium, amount, status, reason, created_at, decided_at, from_account_id, from_name,
+                 to_account_id, to_name, requested_by_name, decided_by_name, can_confirm, can_cancel]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [handover, collection] }
+        medium: { $ref: '#/components/schemas/CashMedium' }
+        amount: { type: integer }
+        status: { $ref: '#/components/schemas/TransferStatus' }
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
+        decided_at: { type: [string, 'null'], format: date-time }
+        from_account_id: { type: string, format: uuid }
+        from_name: { type: string }
+        to_account_id: { type: string, format: uuid }
+        to_name: { type: string }
+        requested_by_name: { type: string }
+        decided_by_name: { type: [string, 'null'] }
+        can_confirm: { type: boolean, description: 閲覧者が確認・差し戻しできるか（status は考慮しない） }
+        can_cancel: { type: boolean, description: 閲覧者が申請者か }
+
+    Reconciliation:
+      type: object
+      required: [id, medium, theoretical_balance, actual_balance, difference, note, created_at, account_name, counted_by_name, confirmed_by_name]
+      properties:
+        id: { type: string, format: uuid }
+        medium: { $ref: '#/components/schemas/CashMedium' }
+        theoretical_balance: { type: integer }
+        actual_balance: { type: integer }
+        difference: { type: integer }
+        note: { type: string }
+        created_at: { type: string, format: date-time }
+        account_name: { type: string }
+        counted_by_name: { type: string }
+        confirmed_by_name: { type: string }
+
+    SalesRow:
+      type: object
+      required: [key, orders, quantity, gross, discount, paid, unpaid, refunded, net]
+      properties:
+        key: { type: string, description: 集計キー（合計行は「合計」） }
+        orders: { type: integer }
+        quantity: { type: integer }
+        gross: { type: integer, description: 値引前金額 }
+        discount: { type: integer }
+        paid: { type: integer, description: 入金（値引後） }
+        unpaid: { type: integer, description: 受付中・未払いの金額 }
+        refunded: { type: integer }
+        net: { type: integer, description: paid − refunded }
+
+    SalesReport:
+      type: object
+      required: [group, label, rows, total]
+      properties:
+        group: { type: string, enum: [day, department, product, hour, cashier] }
+        label: { type: string, description: 集計単位の表示名（例 営業日） }
+        rows:
+          type: array
+          items: { $ref: '#/components/schemas/SalesRow' }
+        total: { $ref: '#/components/schemas/SalesRow' }
+
+    # ---------------- シフト ----------------
+    ShiftSlot:
+      type: object
+      required: [id, business_day, location, starts_at, ends_at, required_count, note, active, assigned_count,
+                 assignments, my_request, mine, requests]
+      properties:
+        id: { type: string, format: uuid }
+        business_day: { type: string, format: date }
+        location: { type: string }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        required_count: { type: integer }
+        note: { type: string }
+        active: { type: boolean }
+        assigned_count: { type: integer }
+        assignments:
+          type: array
+          items:
+            type: object
+            required: [id, member_id, member_name]
+            properties:
+              id: { type: string, format: uuid, description: 配置 ID }
+              member_id: { type: string, format: uuid }
+              member_name: { type: string }
+        my_request:
+          type: [object, 'null']
+          required: [preference, note]
+          properties:
+            preference: { $ref: '#/components/schemas/ShiftPreference' }
+            note: { type: string }
+        mine: { type: boolean, description: 自分が配置されている }
+        requests:
+          type: [array, 'null']
+          description: 全員の希望（admin のみ。それ以外は null）
+          items:
+            type: object
+            required: [member_id, member_name, preference, note]
+            properties:
+              member_id: { type: string, format: uuid }
+              member_name: { type: string }
+              preference: { $ref: '#/components/schemas/ShiftPreference' }
+              note: { type: string }
+
+    ShiftExchange:
+      type: object
+      required: [id, status, reason, created_at, responded_at, decided_at, from_member_id, from_name, to_member_id,
+                 to_name, decided_by_name, location, starts_at, ends_at]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [requested, accepted, approved, declined, rejected, cancelled] }
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
+        responded_at: { type: [string, 'null'], format: date-time }
+        decided_at: { type: [string, 'null'], format: date-time }
+        from_member_id: { type: string, format: uuid }
+        from_name: { type: string }
+        to_member_id: { type: string, format: uuid }
+        to_name: { type: string }
+        decided_by_name: { type: [string, 'null'] }
+        location: { type: string }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+
+    ExchangeResponseAction:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [accept, decline, cancel]
+          description: 'accept/decline=依頼相手, cancel=申請者'
+        reason: { type: string }
+
+    ExchangeDecision:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [approve, reject]
+        reason: { type: string, description: 両者への通知本文 }
+
+    # ---------------- ブロック ----------------
+    AccessBlock:
+      type: object
+      required: [id, scope, reason, source_type, source_id, starts_at, ends_at, lifted_at, lift_reason, created_at,
+                 client_kind, created_by_name, lifted_by_name, effective]
+      properties:
+        id: { type: string, format: uuid }
+        scope: { $ref: '#/components/schemas/BlockScope' }
+        reason: { type: string }
+        source_type: { type: [string, 'null'], enum: [order, reservation, null] }
+        source_id: { type: [string, 'null'], format: uuid }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: [string, 'null'], format: date-time }
+        lifted_at: { type: [string, 'null'], format: date-time }
+        lift_reason: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        client_kind: { type: string, enum: [web, appclip, ios, android] }
+        created_by_name: { type: string }
+        lifted_by_name: { type: [string, 'null'] }
+        effective: { type: boolean, description: 未解除かつ期限内 }

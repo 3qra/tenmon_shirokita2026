@@ -1,0 +1,40 @@
+# SITE_ADDRESS に実ドメインを設定すると Caddy が自動で HTTPS 証明書を取得する。
+{$SITE_ADDRESS} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	# App Clip / ユニバーサルリンク / Android App Links 用の検証ファイル
+	handle /.well-known/apple-app-site-association {
+		root * /srv/well-known
+		header Content-Type application/json
+		rewrite * /apple-app-site-association
+		file_server
+	}
+	handle /.well-known/assetlinks.json {
+		root * /srv/well-known
+		header Content-Type application/json
+		rewrite * /assetlinks.json
+		file_server
+	}
+
+	# API（SSE を遅延なく流すため flush_interval -1）
+	handle /api/* {
+		reverse_proxy api:8080 {
+			flush_interval -1
+		}
+	}
+	handle /healthz {
+		reverse_proxy api:8080
+	}
+
+	# 秘密トークンを含むURLをアクセスログに残さない（ログは既定で無効）
+	handle {
+		# 圧縮はWeb画面のみ（API の SSE を圧縮するとバッファされて届かなくなるため）
+		encode zstd gzip
+		reverse_proxy web:3000
+	}
+}
